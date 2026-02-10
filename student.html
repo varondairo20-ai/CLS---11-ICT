@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CLS Monitor — Student</title>
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    // only allow students
+    (function(){
+      const role = (localStorage.getItem('role') || '').toLowerCase();
+      if (role !== 'student') {
+        window.location.href = 'login.html';
+      }
+    })();
+  </script>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo">CLS</div>
+      <div>
+        <h1>CLS Monitor — Student</h1>
+        <div class="small">Computer Lab Access</div>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="small">Logged in as <strong id="studentName">Student</strong></div>
+      <button class="btn secondary" onclick="logout()">Logout</button>
+    </div>
+  </header>
+
+  <main>
+    <section style="max-width:760px;margin:20px auto;padding:12px">
+        <div style="background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));padding:16px;border-radius:12px;border:1px solid rgba(255,255,255,0.03)">
+        <h2>Welcome</h2>
+        <p class="small">Your screen can be viewed by your teacher when requested.</p>
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <div style="color:var(--muted)">Logged in at: <strong id="loginTime">—</strong></div>
+          <div style="flex:1"></div>
+          <div style="color:var(--muted)">Status: <strong id="connectionStatus">Connecting...</strong></div>
+        </div>
+      </div>
+
+      <div id="status" style="margin-top:12px;color:var(--muted);padding:12px;border-radius:8px;background:rgba(37,99,235,0.1);border:1px solid rgba(37,99,235,0.2);display:none"></div>
+      <div id="requestModal" style="margin-top:20px;padding:16px;border-radius:12px;border:2px solid #fbbf24;background:rgba(251,191,36,0.05);display:none">
+        <h3 style="margin:0 0 12px">Teacher Request</h3>
+        <p style="margin:0 0 12px">Your teacher is requesting to view your screen.</p>
+        <div style="display:flex;gap:8px">
+          <button class="btn secondary" onclick="denyScreenShare()">Deny</button>
+          <button class="btn" style="background:#10b981" onclick="approveScreenShare()">Approve & Share</button>
+        </div>
+      </div>
+
+      <!-- Student can also request to share -->
+      <div style="margin-top:20px;padding:16px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.02)">
+        <h3 style="margin:0 0 8px">Share Your Screen with Teacher</h3>
+        <p style="margin:0 0 12px;color:var(--muted);font-size:0.9em">Proactively share your screen with your teacher.</p>
+        <button class="btn" style="background:#3b82f6" onclick="requestToShare()">Request to Share Screen</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    let ws = null
+    let deviceId = null
+    let clientId = null
+    const peerConnections = new Map()
+    let pendingOffer = null
+    let activeSharedStream = null
+
+    const RTCConfig = {
+      iceServers: [
+        { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+      ]
+    }
+
+    // populate student name (deferred to DOM ready)
+    function populateStudentName() {
+      const name = localStorage.getItem('username') || 'Student'
+      const el = document.getElementById('studentName')
+      if(el) el.textContent = name
+    }
+
+    function logout(){
+      localStorage.removeItem('role')
+      localStorage.removeItem('username')
+      localStorage.removeItem('sessionId')
+      localStorage.removeItem('loginTime')
+      if(ws) ws.close()
+      window.location.href = 'login.html'
+    }
+
+    // populate login time
+    function populateLoginTime() {
+      const raw = localStorage.getItem('loginTime')
+      const el = document.getElementById('loginTime')
+      if(el){
+        try{
+          el.textContent = raw ? new Date(raw).toLocaleString() : '—'
+        }catch(e){ el.textContent = raw }
+      }
+    }
+
+    // Initialize WebSocket connection
+    function initWebSocket() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const wsUrl = `${protocol}//${window.location.host}`
+      console.log('Attempting WebSocket connection to:', wsUrl)
+      ws = new WebSocket(wsUrl)
+      
+      ws.onopen = () => {
+        console.log('WebSocket connected')
+        updateStatus('Connected', '#10b981')
+        
+        // Register as student
+        const sessionId = localStorage.getItem('sessionId')
+        const username = localStorage.getItem('username') || 'Student'
+        console.log('Registering student:', { sessionId, username })
+        
+        if (!sessionId) {
+          console.warn('WARNING: No sessionId in localStorage! User must login first.')
+          updateStatus('Error: Not logged in', '#ef4444')
+          return
+        }
+        
+        ws.send(JSON.stringify({
+          type: 'register-student',
+          payload: { sessionId, username }
+        }))
+      }
+      
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data)
+          handleSignalingMessage(msg)
+        } catch (e) {
+          console.error('Invalid JSON from WebSocket:', e, '\nRaw data:', event.data)
+          // If HTML was returned (e.g. server sent an error page), show it in the status
+          if (typeof event.data === 'string' && event.data.trim().startsWith('<')) {
+            updateStatus('Server returned HTML (check server logs)', '#ef4444')
+          }
+        }
+      }
+      ws.onerror = (err) => {
+        console.error('WebSocket error:', err)
+        updateStatus('Connection Error', '#ef4444')
+      }
+      ws.onclose = () => {
+        console.log('WebSocket disconnected, reconnecting...')
+        updateStatus('Disconnected', '#ef4444')
+        setTimeout(initWebSocket, 3000)
+      }
+    }
+
+    function handleSignalingMessage(msg) {
+      const { type, fromId, payload } = msg
+      
+      if (type === 'registered') {
+        deviceId = msg.deviceId
+        clientId = msg.clientId
+        console.log('Student registered as:', deviceId, 'clientId:', clientId, msg)
+        updateStatus('Ready', '#10b981')
+      }
+      else if (type === 'error') {
+        console.error('Server error:', msg.message)
+        updateStatus('Error: ' + msg.message, '#ef4444')
+      }
+      else if (type === 'offer') {
+        handleOffer(fromId, payload)
+      }
+      else if (type === 'answer') {
+        handleAnswer(fromId, payload)
+      }
+      else if (type === 'answer-reject') {
+        handleAnswerReject(fromId)
+      }
+      else if (type === 'ice-candidate') {
+        handleIceCandidate(fromId, payload)
+      }
+    }
+
+    function handleOffer(fromId, offer) {
+      console.log('Received offer from teacher:', fromId)
+      pendingOffer = { fromId, offer }
+      
+      // Show request modal
+      const modal = document.getElementById('requestModal')
+      if(modal) modal.style.display = 'block'
+      
+      updateStatus('Teacher requesting access...', '#fbbf24')
+    }
+
+    async function approveScreenShare() {
+      if (!pendingOffer || !ws) return
+      
+      const { fromId, offer } = pendingOffer
+      
+      try {
+        const peerConnection = new RTCPeerConnection(RTCConfig)
+        peerConnections.set(fromId, peerConnection)
+        
+        // Set remote offer
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
+        
+        // Capture user's screen
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { cursor: 'always' },
+          audio: false
+        })
+        
+        stream.getTracks().forEach(track => {
+          peerConnection.addTrack(track, stream)
+        })
+        
+        peerConnection.onicecandidate = (event) => {
+          if (event.candidate) {
+            ws.send(JSON.stringify({
+              type: 'ice-candidate',
+              targetId: fromId,
+              payload: event.candidate
+            }))
+          }
+        }
+        
+        peerConnection.ontrack = (event) => {
+          console.log('Received remote track:', event.track.kind)
+        }
+        
+        // Create and send answer
+        const answer = await peerConnection.createAnswer()
+        await peerConnection.setLocalDescription(answer)
+        
+        ws.send(JSON.stringify({
+          type: 'answer',
+          targetId: fromId,
+          payload: answer
+        }))
+        
+        console.log('Screen share approved and answer sent')
+        updateStatus('Sharing screen', '#10b981')
+        
+        // Hide modal
+        const modal = document.getElementById('requestModal')
+        if(modal) modal.style.display = 'none'
+        
+        // Close stream when done
+        stream.getTracks().forEach(track => {
+          track.onended = () => {
+            console.log('Stream ended')
+            updateStatus('Ready', '#10b981')
+            peerConnection.close()
+            peerConnections.delete(fromId)
+          }
+        })
+        
+      } catch (err) {
+        console.error('Error approving screen share:', err)
+        updateStatus('Error: ' + err.message, '#ef4444')
+      }
+      
+      pendingOffer = null
+    }
+
+    function denyScreenShare() {
+      if (!pendingOffer || !ws) return
+      
+      const { fromId } = pendingOffer
+      
+      ws.send(JSON.stringify({
+        type: 'answer-reject',
+        targetId: fromId
+      }))
+      
+      console.log('Screen share request denied')
+      updateStatus('Ready', '#10b981')
+      
+      // Hide modal
+      const modal = document.getElementById('requestModal')
+      if(modal) modal.style.display = 'none'
+      
+      pendingOffer = null
+    }
+
+    // Student initiates screen share request to teacher
+    async function requestToShare() {
+      if (!ws || !clientId) {
+        alert('Not connected to teacher. Please wait...')
+        return
+      }
+
+      try {
+        updateStatus('Requesting to share...', '#fbbf24')
+        
+        const peerConnection = new RTCPeerConnection(RTCConfig)
+        peerConnections.set(clientId, peerConnection)
+        
+        // Capture user's screen
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { cursor: 'always' },
+          audio: false
+        })
+        
+        activeSharedStream = stream
+        
+        // Add tracks to peer connection
+        stream.getTracks().forEach(track => {
+          peerConnection.addTrack(track, stream)
+        })
+        
+        peerConnection.onicecandidate = (event) => {
+          if (event.candidate && ws) {
+            ws.send(JSON.stringify({
+              type: 'ice-candidate',
+              targetId: clientId,
+              payload: event.candidate
+            }))
+          }
+        }
+        
+        // Create offer
+        const offer = await peerConnection.createOffer()
+        await peerConnection.setLocalDescription(offer)
+        
+        ws.send(JSON.stringify({
+          type: 'offer',
+          targetId: clientId,
+          payload: offer
+        }))
+        
+        console.log('Screen share request sent to teacher')
+        updateStatus('Waiting for teacher approval...', '#fbbf24')
+        
+        // Handle stream ending
+        stream.getTracks().forEach(track => {
+          track.onended = () => {
+            console.log('Stream ended by user')
+            peerConnection.close()
+            peerConnections.delete(clientId)
+            activeSharedStream = null
+            updateStatus('Ready', '#10b981')
+          }
+        })
+        
+      } catch (err) {
+        console.error('Error requesting to share:', err)
+        updateStatus('Ready', '#10b981')
+        if (err.name !== 'NotAllowedError') {
+          alert('Error: ' + err.message)
+        }
+      }
+    }
+
+    async function handleAnswer(fromId, answer) {
+      const peerConnection = peerConnections.get(fromId)
+      if (peerConnection) {
+        try {
+          console.log('Answer received from teacher:', fromId)
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(answer))
+        } catch (err) {
+          console.error('Error setting remote description:', err)
+        }
+      }
+    }
+
+    function handleAnswerReject(fromId) {
+      const peerConnection = peerConnections.get(fromId)
+      if (peerConnection) {
+        peerConnection.close()
+        peerConnections.delete(fromId)
+      }
+      
+      // Stop sharing if it was our request
+      if (activeSharedStream) {
+        activeSharedStream.getTracks().forEach(track => track.stop())
+        activeSharedStream = null
+      }
+      
+      updateStatus('Ready', '#10b981')
+      console.log('Teacher rejected screen share request')
+    }
+
+    async function handleIceCandidate(fromId, candidate) {
+      const peerConnection = peerConnections.get(fromId)
+      if (peerConnection && candidate) {
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+        } catch (err) {
+          console.error('Error adding ICE candidate:', err)
+        }
+      }
+    }
+
+    function updateStatus(text, color) {
+      const el = document.getElementById('connectionStatus')
+      if(el) {
+        el.textContent = text
+        el.style.color = color
+      } else {
+        console.warn('connectionStatus element not found!')
+      }
+    }
+
+    // Start immediately
+    console.log('Student.html script loaded')
+    
+    // Wait for DOM to be ready before initializing WebSocket
+    function startWhenReady() {
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+          console.log('DOM ready, initializing')
+          populateStudentName()
+          populateLoginTime()
+          initWebSocket()
+        })
+      } else {
+        console.log('DOM already loaded, initializing')
+        populateStudentName()
+        populateLoginTime()
+        initWebSocket()
+      }
+    }
+    
+    startWhenReady()
+  </script>
+</body>
+</html>
