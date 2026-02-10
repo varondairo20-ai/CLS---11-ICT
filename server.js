@@ -325,6 +325,32 @@ wss.on('connection', (ws) => {
           }))
         }
       }
+      else if (type === 'broadcast') {
+        // Broadcast text message to all student devices
+        const { text } = payload || {}
+        if (!text) return
+        devices.forEach(d => {
+          const c = clients.get(d.clientId)
+          if (c && c.ws.readyState === WebSocket.OPEN) {
+            c.ws.send(JSON.stringify({ type: 'broadcast', payload: { text, from: username || clientId } }))
+          }
+        })
+        // Optionally ack to sender
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'broadcast-sent' }))
+      }
+      else if (type === 'direct-message') {
+        // Send a direct text message to a specific deviceId
+        const { targetId, text } = msg
+        if (!targetId || !text) return
+        const targetDevice = devices.get(targetId)
+        if (targetDevice) {
+          const c = clients.get(targetDevice.clientId)
+          if (c && c.ws.readyState === WebSocket.OPEN) {
+            c.ws.send(JSON.stringify({ type: 'direct-message', payload: { text, from: username || clientId } }))
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'direct-sent', targetId }))
+          }
+        }
+      }
       else {
         console.debug(`[${clientId}] Unknown message type: ${type}`)
       }

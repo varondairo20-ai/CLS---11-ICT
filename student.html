@@ -52,6 +52,9 @@
       </section>
     </main>
 
+      <!-- Incoming messages area -->
+      <div id="messageBox" style="position:fixed;right:18px;bottom:18px;max-width:320px;z-index:400"></div>
+
     <script>
       // Prefer local signaling when testing on localhost, otherwise use meta or fallback
       const SIGNALING = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
@@ -91,7 +94,7 @@
           try{
             const msg = JSON.parse(e.data)
             console.log('ws message ->', msg)
-            handleSignal(msg)
+              handleSignal(msg)
           }catch(err){console.error('ws message parse', err)}
         }
         ws.onerror = (err)=>{ console.error('ws error', err); showToast('WebSocket error', true) }
@@ -104,6 +107,13 @@
 
       async function handleSignal(msg){
         console.log('student ws message ->', msg)
+        if(msg.type === 'broadcast' || msg.type === 'direct-message'){
+          const p = msg.payload || {}
+          const text = p.text || p.text
+          const from = p.from || 'Teacher'
+          showIncomingMessage(text, from, msg.type === 'direct-message')
+          return
+        }
         if(msg.type === 'offer'){
           // payload is expected as { desc: <RTCDesc>, meta: { mode } }
           const fromId = msg.fromId
@@ -170,6 +180,21 @@
           stream.getTracks().forEach(track => { track.onended = ()=>{ v.srcObject=null; pc.close(); pcs.delete(fromId) } })
         }catch(err){ console.error(err); showToast(err.message, true) }
         pendingOffer = null
+      }
+
+      function showIncomingMessage(text, from, isDirect){
+        const box = document.getElementById('messageBox')
+        if(!box) return
+        const el = document.createElement('div')
+        el.style.background = 'rgba(15,23,42,0.95)'
+        el.style.color = 'white'
+        el.style.padding = '10px'
+        el.style.borderRadius = '8px'
+        el.style.marginTop = '8px'
+        el.style.boxShadow = '0 6px 20px rgba(0,0,0,0.6)'
+        el.innerHTML = `<strong style="display:block;margin-bottom:6px">${from}${isDirect? ' (private)':''}</strong><div style="font-size:14px">${text}</div>`
+        box.prepend(el)
+        setTimeout(()=>{ el.style.opacity = '0'; setTimeout(()=>el.remove(),400) }, 8000)
       }
 
       function denyScreenShare(){
