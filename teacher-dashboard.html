@@ -369,10 +369,14 @@
     }
 
     function logout(){
+      try{
+        if(ws){ ws.close(); ws = null }
+      }catch(e){ /* ignore */ }
       localStorage.removeItem('role')
       localStorage.removeItem('username')
       localStorage.removeItem('sessionId')
-      window.location.href = 'teacher-login.html'
+      localStorage.removeItem('loginTime')
+      window.location.href = 'login.html'
     }
 
     // assign DOM elements and render after DOM is ready
