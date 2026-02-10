@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script>
+    // Auth check — redirect to login if not teacher
+    (function(){
+      const role = (localStorage.getItem('role') || '').toLowerCase();
+      if (!role || role !== 'teacher') {
+        window.location.href = 'login.html';
+      }
+    })();
+  </script>
+  <title>CLS Monitor — Prototype</title>
+  <link rel="stylesheet" href="styles.css">
+  <!-- Signaling server: Render backend (Singapore region) -->
+  <meta name="signal-server" content="wss://cls-11-ict.onrender.com">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo">CLS</div>
+      <div>
+        <h1>CLS Monitor — Teacher Dashboard</h1>
+        <div class="small">Computer Lab Supervision</div>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="small">Logged in as <strong id="loggedInUser">Mr. Dairo</strong></div>
+      <button class="btn" onclick="broadcastPrompt()">Broadcast Message</button>
+      <button class="btn secondary" onclick="logout()">Logout</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="toolbar">
+      <input class="search" placeholder="Search student or device number..." id="search" oninput="filterGrid()">
+      <div style="flex:1"></div>
+      <div class="small">Devices: <strong id="deviceCount">12</strong></div>
+    </div>
+
+    <section class="grid" id="grid">
+
+    </section>
+
+  </main>
+
+  <div id="screenViewerModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:#000;z-index:1000;flex-direction:column;align-items:center;justify-content:center">
+    <video id="remoteVideo" style="width:100%;height:100%;object-fit:contain" autoplay playsinline></video>
+    <div style="position:absolute;top:12px;right:12px;display:flex;gap:8px">
+      <button class="btn secondary" onclick="denyIncomingScreen()">Deny</button>
+      <button class="btn secondary" onclick="closeScreenViewer()">Close</button>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modal">
+    <div class="modal" role="dialog">
+      <h3 id="modalTitle">Request</h3>
+      <p id="modalMessage">Are you sure?</p>
+      <div class="modal-actions">
+        <button class="ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn" id="modalConfirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Student screen share request modal -->
+  <div id="incomingScreenModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:999;display:none;flex-direction:column;align-items:center;justify-content:center">
+    <div style="background:#0b1220;padding:24px;border-radius:12px;border:1px solid rgba(37,99,235,0.3);max-width:400px;text-align:center">
+      <h2 style="margin:0 0 16px">Student Screen Share</h2>
+      <p id="incomingScreenMessage" style="margin:0 0 20px;color:var(--muted)">A student is requesting to share their screen.</p>
+      <div style="display:flex;gap:8px;justify-content:center">
+        <button class="btn secondary" onclick="rejectIncomingScreen()">Reject</button>
+        <button class="btn" style="background:#10b981" onclick="acceptIncomingScreen()">Accept & View</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Tip: Webcam requests require student approval.
+  </footer>
+
+  <script>
+  
+    let devices = []  // Will be populated from server
+
+    let grid
+    let deviceCount
+
+    // WebRTC Configuration
+    const RTCConfig = {
+      iceServers: [
+        { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+      ]
+    }
+    
+    let ws = null
+    let clientId = null
+    const peerConnections = new Map()
+    const pendingRequests = new Map()
+    let pendingIncomingOffer = null
+
+    function initWebSocket() {
+      const configured = document.querySelector('meta[name="signal-server"]').getAttribute('content') || ''
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const host = configured.trim() || window.location.host
+      ws = new WebSocket(`${protocol}//${host}`)
+      
+      ws.onopen = () => {
+        console.log('WebSocket connected to server')
+        // Register as teacher
+        const username = localStorage.getItem('username') || 'Teacher'
+        ws.send(JSON.stringify({
+          type: 'register-teacher',
+          payload: { username }
+        }))
+      }
+      
+      ws.onmessage = (event) => handleSignalingMessage(JSON.parse(event.data))
+      ws.onerror = (err) => console.error('WebSocket error:', err)
+      ws.onclose = () => {
+        console.log('WebSocket disconnected, reconnecting...')
+        setTimeout(initWebSocket, 3000)
+      }
+    }
+
+    function handleSignalingMessage(msg) {
+      const { type, fromId, payload } = msg
+
+      if (type === 'registered') {
+        clientId = msg.clientId
+        console.log('Teacher registered as:', clientId)
+      } else if (type === 'device-list') {
+        devices = msg.devices || []
+        render()
+      } else if (type === 'offer') {
+        // Student is requesting to share their screen
+        console.log('Incoming screen share request from student:', fromId)
+        handleIncomingOffer(fromId, payload)
+      } else if (type === 'answer') {
+        handleAnswer(fromId, payload)
+      } else if (type === 'answer-reject') {
+        handleAnswerReject(fromId)
+      } else if (type === 'ice-candidate') {
+        handleIceCandidate(fromId, payload)
+      } else if (type === 'error') {
+        console.error('Signaling error:', msg.message || msg)
+      } else {
+        console.debug('Unhandled signaling message:', msg)
+      }
+    }
+
+    async function sendWebRTCRequest(deviceId) {
+      if (!ws || !clientId) {
+        toast('WebSocket connection not ready', true)
+        return
+      }
+
+      try {
+        const peerConnection = new RTCPeerConnection(RTCConfig)
+        peerConnections.set(deviceId, peerConnection)
+        pendingRequests.set(deviceId, { startTime: Date.now() })
+
+        // Setup handlers for incoming stream from student
+        peerConnection.ontrack = (event) => {
+          console.log('Received remote track from student:', event.track.kind)
+          // Stream from student will be displayed here in a future update
+        }
+
+        peerConnection.onicecandidate = (event) => {
+          if (event.candidate && ws) {
+            ws.send(JSON.stringify({
+              type: 'ice-candidate',
+              targetId: deviceId,
+              payload: event.candidate
+            }))
+          }
+        }
+
+        // Create offer (student will respond with their screen)
+        const offer = await peerConnection.createOffer()
+        await peerConnection.setLocalDescription(offer)
+
+        ws.send(JSON.stringify({
+          type: 'offer',
+          targetId: deviceId,
+          payload: offer
+        }))
+
+        showModal('Waiting...', `Waiting for ${deviceId} to share their screen...`)
+        console.log('Screen sharing request sent to', deviceId)
+      } catch (err) {
+        console.error('Error sending screen share request:', err)
+        toast('Failed: ' + err.message, true)
+        peerConnections.delete(deviceId)
+        pendingRequests.delete(deviceId)
+      }
+    }
+
+    async function handleAnswer(fromId, answer) {
+      const peerConnection = peerConnections.get(fromId)
+      if (peerConnection) {
+        try {
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(answer))
+          
+          // Setup to receive video stream from student
+          peerConnection.ontrack = (event) => {
+            console.log('Received remote video track from student:', event.track.kind)
+            const remoteVideo = document.getElementById('remoteVideo')
+            if (remoteVideo && event.streams && event.streams[0]) {
+              remoteVideo.srcObject = event.streams[0]
+              // Show fullscreen viewer
+              document.getElementById('screenViewerModal').style.display = 'flex'
+              closeModal()
+            }
+          }
+          
+          // Mark request as approved
+          if (pendingRequests.has(fromId)) {
+            pendingRequests.delete(fromId)
+            const d = devices.find(x => x.id === fromId)
+            if (d) {
+              d.webcamAllowed = true
+              render()
+              toast(`${fromId} is sharing their screen.`)
+            }
+          }
+          console.log('Answer received from', fromId)
+        } catch (err) {
+          console.error('Error handling answer:', err)
+        }
+      }
+    }
+
+    function closeScreenViewer() {
+      pendingIncomingOffer = null
+    }
+
+    // Handle incoming screen share request from student
+    function handleIncomingOffer(fromId, offer) {
+      pendingIncomingOffer = { fromId, offer }
+      
+      const message = document.getElementById('incomingScreenMessage')
+      const deviceName = devices.find(d => d.id === fromId)?.name || fromId
+      if (message) {
+        message.textContent = `${deviceName} is requesting to share their screen.`
+      }
+      
+      const modal = document.getElementById('incomingScreenModal')
+      if (modal) modal.style.display = 'flex'
+    }
+
+    // Accept incoming screen share from student
+    async function acceptIncomingScreen() {
+      if (!pendingIncomingOffer || !ws) return
+      
+      const { fromId, offer } = pendingIncomingOffer
+      
+      try {
+        const peerConnection = new RTCPeerConnection(RTCConfig)
+        peerConnections.set(fromId, peerConnection)
+        
+        // Set remote offer from student
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
+        
+        // Handle incoming video stream from student
+        peerConnection.ontrack = (event) => {
+          console.log('Receiving video track from student:', event.track.kind)
+          const remoteVideo = document.getElementById('remoteVideo')
+          if (remoteVideo && event.streams && event.streams[0]) {
+            remoteVideo.srcObject = event.streams[0]
+            // Show fullscreen viewer
+            document.getElementById('screenViewerModal').style.display = 'flex'
+            document.getElementById('incomingScreenModal').style.display = 'none'
+          }
+        }
+        
+        peerConnection.onicecandidate = (event) => {
+          if (event.candidate && ws) {
+            ws.send(JSON.stringify({
+              type: 'ice-candidate',
+              targetId: fromId,
+              payload: event.candidate
+            }))
+          }
+        }
+        
+        // Create and send answer
+        const answer = await peerConnection.createAnswer()
+        await peerConnection.setLocalDescription(answer)
+        
+        ws.send(JSON.stringify({
+          type: 'answer',
+          targetId: fromId,
+          payload: answer
+        }))
+        
+        console.log('Screen share accepted from student:', fromId)
+        toast(`${fromId} is sharing their screen`)
+        
+      } catch (err) {
+        console.error('Error accepting screen share:', err)
+        toast('Error accepting screen share: ' + err.message, true)
+      }
+      
+      pendingIncomingOffer = null
+    }
+
+    // Reject incoming screen share from student
+    function rejectIncomingScreen() {
+      if (!pendingIncomingOffer || !ws) return
+      
+      const { fromId } = pendingIncomingOffer
+      
+      ws.send(JSON.stringify({
+        type: 'answer-reject',
+        targetId: fromId
+      }))
+      
+      console.log('Screen share request rejected for:', fromId)
+      document.getElementById('incomingScreenModal').style.display = 'none'
+      toast('Request denied', false)
+      
+      pendingIncomingOffer = null
+    }
+
+    function denyIncomingScreen() {
+      const peerConnection = peerConnections.get(pendingIncomingOffer?.fromId)
+      if (peerConnection) {
+        peerConnection.close()
+        peerConnections.delete(pendingIncomingOffer.fromId)
+      }
+      
+      rejectIncomingScreen()
+      closeScreenViewer()
+      const modal = document.getElementById('screenViewerModal')
+      const video = document.getElementById('remoteVideo')
+      modal.style.display = 'none'
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(track => track.stop())
+        video.srcObject = null
+      }
+    }
+
+    function handleAnswerReject(fromId) {
+      if (pendingRequests.has(fromId)) {
+        pendingRequests.delete(fromId)
+        closeModal()
+        toast(`${fromId} denied the request.`, true)
+      }
+
+      const pc = peerConnections.get(fromId)
+      if (pc) {
+        pc.close()
+        peerConnections.delete(fromId)
+      }
+    }
+
+    async function handleIceCandidate(fromId, candidate) {
+      const peerConnection = peerConnections.get(fromId)
+      if (peerConnection && candidate) {
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+        } catch (err) {
+          console.error('Error adding ICE candidate:', err)
+        }
+      }
+    }
+
+    function logout(){
+      localStorage.removeItem('role')
+      localStorage.removeItem('username')
+      localStorage.removeItem('sessionId')
+      window.location.href = 'teacher-login.html'
+    }
+
+    // assign DOM elements and render after DOM is ready
+    document.addEventListener('DOMContentLoaded', ()=>{
+      console.debug('readyState', document.readyState)
+      grid = document.getElementById('grid')
+      deviceCount = document.getElementById('deviceCount')
+
+      // Initialize WebSocket for WebRTC signaling
+      initWebSocket()
+
+      // fallback: find by class if id missing
+      if(!grid){
+        console.warn('#grid not found, trying .grid')
+        grid = document.querySelector('.grid')
+        if(grid) grid.id = 'grid' // ensure id exists for future selectors
+      }
+
+      // if still missing, create a container and append to <main>
+      if(!grid){
+        console.warn('No grid container found — creating fallback #grid inside <main>')
+        const mainEl = document.querySelector('main') || document.body
+        grid = document.createElement('section')
+        grid.className = 'grid'
+        grid.id = 'grid'
+        mainEl.appendChild(grid)
+      }
+
+      // show stored username in header
+      try{
+        const display = localStorage.getItem('username') || ''
+        const el = document.getElementById('loggedInUser')
+        if(el && display) el.textContent = display
+      }catch(e){ console.warn('username display failed', e) }
+
+      console.debug('DOMContentLoaded: grid=', !!grid, 'deviceCount=', !!deviceCount)
+      try{
+        render()
+      }catch(err){
+        console.error('Render error', err)
+      }
+    })
+
+    function render(){
+      if(!grid) return console.warn('render: #grid not found')
+      grid.innerHTML = ''
+      devices.forEach(d=>{
+        const card = document.createElement('div')
+        card.className = 'card'
+        card.dataset.id = d.id
+
+        // screen
+        const screen = document.createElement('div')
+        screen.className = 'screen'
+        screen.id = `screen-${d.id}`
+        const img = document.createElement('img')
+        img.src = `https://picsum.photos/seed/${d.id}/800/600`
+        img.alt = 'screen'
+        screen.appendChild(img)
+        
+        const overlay = document.createElement('div'); overlay.className='overlay'
+        const ovInner = document.createElement('div'); ovInner.style.display='flex'; ovInner.style.flexDirection='column'; ovInner.style.color='white'
+        const ovName = document.createElement('div'); ovName.style.fontWeight='700'; ovName.textContent = d.name
+        const ovSmall = document.createElement('div'); ovSmall.className='small'; ovSmall.textContent = `${d.id} • ${d.status}`
+        ovInner.appendChild(ovName); ovInner.appendChild(ovSmall); overlay.appendChild(ovInner); screen.appendChild(overlay)
+        card.appendChild(screen)
+
+        // meta
+        const meta = document.createElement('div'); meta.className='meta'
+        const metaLeft = document.createElement('div')
+        const nameDiv = document.createElement('div'); nameDiv.className='name'; nameDiv.textContent = d.name
+        const idDiv = document.createElement('div'); idDiv.className='small'; idDiv.textContent = d.id
+        metaLeft.appendChild(nameDiv); metaLeft.appendChild(idDiv)
+        const metaRight = document.createElement('div'); metaRight.style.textAlign='right'
+        const webcamDiv = document.createElement('div'); webcamDiv.className='small'; webcamDiv.innerHTML = d.webcamAllowed? '<span style="color:var(--success)">Webcam ✓</span>' : 'Webcam —'
+        metaRight.appendChild(webcamDiv)
+        meta.appendChild(metaLeft); meta.appendChild(metaRight)
+        card.appendChild(meta)
+
+        // actions
+        const actions = document.createElement('div'); actions.className='actions'
+        const btnView = document.createElement('button'); btnView.className='ghost'; btnView.textContent='View'; btnView.setAttribute('onclick', `viewLive('${d.id}')`)
+        const btnReq = document.createElement('button'); btnReq.className='ghost'; btnReq.textContent='Request Screen Sharing'; btnReq.setAttribute('onclick', `requestWebcam('${d.id}')`)
+        const btnMsg = document.createElement('button'); btnMsg.className='ghost'; btnMsg.textContent='Message'; btnMsg.setAttribute('onclick', `sendMessagePrompt('${d.id}')`)
+        actions.appendChild(btnView); actions.appendChild(btnReq); actions.appendChild(btnMsg)
+        card.appendChild(actions)
+
+        grid.appendChild(card)
+      })
+      if(deviceCount) deviceCount.textContent = devices.length
+      console.debug('rendered', devices.length, 'devices')
+    }
+
+   
+    function viewLive(id){
+      showModal('Live View', 'Open failed, wala pang js to. '+id+'.','Close',()=>closeModal())
+    }
+
+    function requestWebcam(id){
+      showModal('Request Screen Sharing', 'Send screen sharing request to '+id+'?', 'Request', ()=>{
+        closeModal()
+        sendWebRTCRequest(id)
+      })
+    }
+
+
+    function sendMessagePrompt(id){
+      showModal('Send Message', 'Type a short message to '+id+':', 'Send', ()=>{
+        closeModal(); toast('Message sent to '+id)
+      }, true)
+    }
+
+    function broadcastPrompt(){
+      showModal('Broadcast', 'Type a broadcast message for all devices:', 'Broadcast', ()=>{closeModal(); toast('Broadcast sent to all devices')}, true)
+    }
+
+    const modal = document.getElementById('modal')
+    const modalTitle = document.getElementById('modalTitle')
+    const modalMessage = document.getElementById('modalMessage')
+    const modalConfirm = document.getElementById('modalConfirm')
+
+    function showModal(title,msg,confirmText,confirmCb,allowTextInput){
+      modalTitle.textContent = title
+      if(allowTextInput){
+        modalMessage.innerHTML = `<textarea id="modalInput" placeholder="Type message here" style="width:100%;height:80px;padding:8px;background:#071224;border-radius:8px;border:1px solid rgba(255,255,255,0.03);color:white"></textarea>`
+      } else {
+        modalMessage.textContent = msg
+      }
+      modalConfirm.textContent = confirmText || 'OK'
+      modal.style.display = 'flex'
+      modalConfirm.onclick = ()=>{
+        if(allowTextInput){
+          const v = document.getElementById('modalInput').value
+          if(!v.trim()){ toast('Please type a message first', true); return }
+          confirmCb && confirmCb(v)
+        } else {
+          confirmCb && confirmCb()
+        }
+      }
+    }
+    function closeModal(){ modal.style.display = 'none'; modalConfirm.onclick = null }
+
+  
+    function toast(msg, isError=false){
+      const t = document.createElement('div')
+      t.textContent = msg
+      t.style.position='fixed'
+      t.style.right='18px'
+      t.style.bottom='18px'
+      t.style.background=isError? 'rgba(239,68,68,0.95)' : 'rgba(37,99,235,0.95)'
+      t.style.padding='10px 14px'
+      t.style.borderRadius='8px'
+      t.style.color='white'
+      t.style.zIndex=120
+      document.body.appendChild(t)
+      setTimeout(()=>{ t.style.opacity=0; setTimeout(()=>t.remove(),400) },2000)
+    }
+
+    function filterGrid(){
+      const q = document.getElementById('search').value.toLowerCase()
+      const cards = Array.from(document.querySelectorAll('.card'))
+      cards.forEach(c=>{
+        const name = c.querySelector('.name').textContent.toLowerCase()
+        const id = c.dataset.id.toLowerCase()
+        c.style.display = (name.includes(q) || id.includes(q)) ? '' : 'none'
+      })
+    }
+
+  </script>
+</body>
+</html>
