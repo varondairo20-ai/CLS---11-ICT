@@ -1,41 +1,40 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>CLS Monitor — Student</title>
-  <link rel="stylesheet" href="styles.css">
-  <!-- Signaling server: Render backend (Singapore region) -->
-  <meta name="signal-server" content="wss://cls-11-ict.onrender.com">
-  <script>
-    // only allow students
-    (function(){
-      const role = (localStorage.getItem('role') || '').toLowerCase();
-      if (role !== 'student') {
-        window.location.href = 'login.html';
-      }
-    })();
-  </script>
-</head>
-<body>
-  <header>
-    <div class="brand">
-      <div class="logo">CLS</div>
-      <div>
-        <h1>CLS Monitor — Student</h1>
-        <div class="small">Computer Lab Access</div>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Student — CLS</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <div class="logo">CLS</div>
+        <div>
+          <h1>Student View</h1>
+          <div class="small">Student client</div>
+        </div>
       </div>
-    </div>
-    <div class="controls">
-      <div class="small">Logged in as <strong id="studentName">Student</strong></div>
-      <button class="btn secondary" onclick="logout()">Logout</button>
-    </div>
-  </header>
-
-  <main>
-    <section style="max-width:760px;margin:20px auto;padding:12px">
-        <div style="background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));padding:16px;border-radius:12px;border:1px solid rgba(255,255,255,0.03)">
-        <h2>Welcome</h2>
+    </header>
+    <main>
+      <section style="max-width:760px;margin:24px auto;padding:12px">
+        <h2>Your Screen</h2>
+        <p>This is the student page placeholder for the screen share client.</p>
+        <video id="localPreview" autoplay playsinline style="width:100%;height:360px;background:#051224;border-radius:8px"></video>
+      </section>
+    </main>
+    <script>
+      async function startPreview(){
+        try{
+          const s = await navigator.mediaDevices.getDisplayMedia({video:true})
+          const v = document.getElementById('localPreview')
+          v.srcObject = s
+        }catch(e){ console.warn('Preview failed', e) }
+      }
+      document.addEventListener('DOMContentLoaded', startPreview)
+    </script>
+  </body>
+</html>
         <p class="small">Your screen can be viewed by your teacher when requested.</p>
         <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <div style="color:var(--muted)">Logged in at: <strong id="loginTime">—</strong></div>
