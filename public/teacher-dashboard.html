@@ -12,13 +12,38 @@
       }
     })();
   </script>
+  <script>
+    // Minimal logout shim defined early so Logout button still works
+    function logout(){
+      try{ if (typeof ws !== 'undefined' && ws){ try{ ws.close(); }catch(e){} } }catch(e){}
+      localStorage.removeItem('role')
+      localStorage.removeItem('username')
+      localStorage.removeItem('sessionId')
+      localStorage.removeItem('loginTime')
+      window.location.href = 'login.html'
+    }
+  </script>
+  <script>
+    // Delegated click handler to ensure Logout works even if later scripts fail
+    document.addEventListener('click', function (e) {
+      try {
+        const btn = e.target.closest('[onclick="logout()"]')
+        if (btn) {
+          e.preventDefault()
+          logout()
+        }
+      } catch (err) {
+        console.error('Logout delegation error', err)
+      }
+    })
+  </script>
   <title>CLS Monitor — Prototype</title>
   <link rel="stylesheet" href="styles.css">
   <!-- Signaling server: Render backend (Singapore region) -->
   <meta name="signal-server" content="wss://cls-11-ict.onrender.com">
 </head>
 <body>
-  <header>
+  <header style="position:relative;z-index:1200">
     <div class="brand">
       <div class="logo">CLS</div>
       <div>
@@ -96,6 +121,7 @@
     }
     
     let ws = null
+    let manualDisconnect = false
     let clientId = null
     const peerConnections = new Map()
     const pendingRequests = new Map()
@@ -109,6 +135,8 @@
       
       ws.onopen = () => {
         console.log('WebSocket connected to server')
+        // Clear manual-disconnect flag when a connection opens
+        manualDisconnect = false
         // Register as teacher
         const username = localStorage.getItem('username') || 'Teacher'
         ws.send(JSON.stringify({
@@ -120,7 +148,13 @@
       ws.onmessage = (event) => handleSignalingMessage(JSON.parse(event.data))
       ws.onerror = (err) => console.error('WebSocket error:', err)
       ws.onclose = () => {
-        console.log('WebSocket disconnected, reconnecting...')
+        console.log('WebSocket disconnected')
+        if (manualDisconnect) {
+          console.log('Manual disconnect detected; not reconnecting')
+          manualDisconnect = false
+          return
+        }
+        console.log('Reconnecting...')
         setTimeout(initWebSocket, 3000)
       }
     }
@@ -369,7 +403,7 @@
     }
 
     function logout(){
-      try{ if(ws){ ws.close(); ws = null } }catch(e){ }
+      try{ if(ws){ manualDisconnect = true; ws.close(); ws = null } }catch(e){ }
       localStorage.removeItem('role')
       localStorage.removeItem('username')
       localStorage.removeItem('sessionId')
