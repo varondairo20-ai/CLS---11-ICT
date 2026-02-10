@@ -1,332 +1,359 @@
-require('dotenv').config()
-const os = require('os')
-
 const express = require('express')
-const http = require('http')
-const path = require('path')
 const WebSocket = require('ws')
+const http = require('http')
+const mysql = require('mysql2/promise')
+const bcrypt = require('bcryptjs')
+require('dotenv').config()
 
 const app = express()
-const server = http.createServer(app)
-const wss = new WebSocket.Server({ server })
 const PORT = process.env.PORT || 3000
 
 // Middleware
+app.use(express.static(__dirname))
 app.use(express.json())
-app.use(express.static(path.join(__dirname)))
 
-// In-memory accounts (default test accounts)
-const accounts = {
-  'teacher_01': {
-    password: 'password123',
-    role: 'teacher',
-    createdAt: new Date().toISOString()
-  },
-  'student_01': {
-    password: 'password123',
-    role: 'student',
-    createdAt: new Date().toISOString()
-  },
-  'student_02': {
-    password: 'password123',
-    role: 'student',
-    createdAt: new Date().toISOString()
+// MySQL connection pool
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || 'root',
+  database: process.env.DB_NAME || 'cls_monitor',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+})
+
+// Initialize database schema (run once)
+async function initDB() {
+  try {
+    // First, create a connection without database to create the database
+    const initPool = mysql.createPool({
+      host: process.env.DB_HOST || 'localhost',
+      user: process.env.DB_USER || 'root',
+      password: process.env.DB_PASSWORD || 'root',
+      waitForConnections: true,
+      connectionLimit: 1,
+      queueLimit: 0
+    })
+    
+    const initConn = await initPool.getConnection()
+    try {
+      // Create database if not exists
+      await initConn.execute(`CREATE DATABASE IF NOT EXISTS ${process.env.DB_NAME || 'cls_monitor'}`)
+      console.log(`✅ Database ${process.env.DB_NAME || 'cls_monitor'} ready`)
+    } finally {
+      initConn.release()
+      initPool.end()
+    }
+    
+    // Now connect to the database and create tables
+    const conn = await pool.getConnection()
+    try {
+      await conn.execute(`
+        CREATE TABLE IF NOT EXISTS users (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          username VARCHAR(255) UNIQUE NOT NULL,
+          password VARCHAR(255) NOT NULL,
+          role ENUM('teacher', 'student') NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+      
+      // Create sessions table with logout_time support
+      await conn.execute(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          user_id INT NOT NULL,
+          session_id VARCHAR(255) UNIQUE NOT NULL,
+          login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          logout_time TIMESTAMP NULL DEFAULT NULL,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+      `)
+      
+      // Add logout_time column if it doesn't exist (for existing tables)
+      try {
+        await conn.execute(`ALTER TABLE sessions ADD COLUMN logout_time TIMESTAMP NULL DEFAULT NULL`)
+      } catch (err) {
+        if (err.code !== 'ER_DUP_FIELDNAME') throw err
+        // Column already exists, that's fine
+      }
+      
+      console.log('✅ Database schema initialized')
+
+      // Insert demo accounts (skip if they already exist)
+      const demoAccounts = [
+        { username: 'teacher1', password: 'teacher123', role: 'teacher' },
+        { username: 'teacher2', password: 'teacher123', role: 'teacher' },
+        { username: 'student1', password: 'student123', role: 'student' },
+        { username: 'student2', password: 'student123', role: 'student' }
+      ]
+
+      for (const account of demoAccounts) {
+        try {
+          const hashedPassword = await bcrypt.hash(account.password, 10)
+          await conn.execute(
+            'INSERT INTO users (username, password, role) VALUES (?, ?, ?)',
+            [account.username, hashedPassword, account.role]
+          )
+        } catch (err) {
+          if (err.code !== 'ER_DUP_ENTRY') {
+            throw err
+          }
+          // Account already exists, skip
+        }
+      }
+      console.log('✅ Demo accounts ready')
+    } finally {
+      conn.release()
+    }
+  } catch (err) {
+    console.error('DB init error:', err.message)
   }
 }
 
-console.log('[OK] Accounts loaded from memory:', Object.keys(accounts))
+initDB()
 
-// Connected clients
-const clients = {
-  teachers: new Map(),
-  students: new Map(),
-  sessionToDevice: new Map()  // Map sessionId to deviceId
-}
+// Create HTTP server and WebSocket server
+const server = http.createServer(app)
+const wss = new WebSocket.Server({ server })
+
+// Auth endpoints
+app.post('/api/register', async (req, res) => {
+  const { username, password, role } = req.body
+  if (!username || !password || !role) {
+    return res.status(400).json({ error: 'Missing fields' })
+  }
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10)
+    const conn = await pool.getConnection()
+    try {
+      await conn.execute('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', [
+        username, hashedPassword, role
+      ])
+      res.json({ success: true, message: 'Registration successful' })
+    } finally {
+      conn.release()
+    }
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      res.status(400).json({ error: 'Username already exists' })
+    } else {
+      res.status(500).json({ error: err.message })
+    }
+  }
+})
+
+app.post('/api/login', async (req, res) => {
+  const { username, password, role } = req.body
+  if (!username || !password || !role) {
+    return res.status(400).json({ error: 'Missing fields' })
+  }
+  try {
+    const conn = await pool.getConnection()
+    try {
+      const [rows] = await conn.execute('SELECT id, username, password, role FROM users WHERE username = ? AND role = ?', [
+        username, role
+      ])
+      if (rows.length === 0) {
+        return res.status(401).json({ error: 'Invalid credentials' })
+      }
+      const user = rows[0]
+      const passwordMatch = await bcrypt.compare(password, user.password)
+      if (!passwordMatch) {
+        return res.status(401).json({ error: 'Invalid credentials' })
+      }
+      // Create session
+      const sessionId = 'sid-' + Math.random().toString(36).slice(2)
+      await conn.execute('INSERT INTO sessions (user_id, session_id) VALUES (?, ?)', [
+        user.id, sessionId
+      ])
+      res.json({ success: true, sessionId, username: user.username, role: user.role })
+    } finally {
+      conn.release()
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Logout endpoint - update session logout_time
+app.post('/api/logout', async (req, res) => {
+  const { sessionId } = req.body
+  if (!sessionId) {
+    return res.status(400).json({ error: 'Missing sessionId' })
+  }
+  try {
+    const conn = await pool.getConnection()
+    try {
+      await conn.execute('UPDATE sessions SET logout_time = NOW() WHERE session_id = ?', [sessionId])
+      res.json({ success: true })
+    } finally {
+      conn.release()
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Get activity logs for all students
+app.get('/api/logs', async (req, res) => {
+  try {
+    const conn = await pool.getConnection()
+    try {
+      const [rows] = await conn.execute(`
+        SELECT users.username, sessions.login_time, sessions.logout_time 
+        FROM sessions
+        JOIN users ON sessions.user_id = users.id
+        WHERE users.role = 'student'
+        ORDER BY sessions.login_time DESC
+        LIMIT 100
+      `)
+      res.json({ success: true, logs: rows })
+    } finally {
+      conn.release()
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Store connected clients
+const clients = new Map()
+const devices = new Map() // deviceId -> { id, name, role, clientId }
+let clientCounter = 0
 
 function broadcastDeviceList() {
-  const devices = Array.from(clients.students.values()).map(s => ({
-    id: s.deviceId,
-    name: s.username,
-    status: 'active',
-    webcamAllowed: s.webcamAllowed || false,
-    connectedAt: s.connectedAt
-  }))
-
-  console.log(`[broadcastDeviceList] ${devices.length} devices`)
-
-  clients.teachers.forEach(teacher => {
-    if (teacher.ws.readyState === WebSocket.OPEN) {
-      teacher.ws.send(JSON.stringify({
-        type: 'device-list',
-        devices
-      }))
+  const deviceList = Array.from(devices.values()).filter(d => d.role === 'student')
+  const msg = JSON.stringify({ type: 'device-list', devices: deviceList })
+  
+  // Send to all connected teachers
+  clients.forEach((client) => {
+    if (client.role === 'teacher' && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(msg)
     }
   })
 }
 
-// REST API - Unified Authentication
-app.post('/api/auth/login', (req, res) => {
-  const { username, password } = req.body
-
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password required' })
-  }
-
-  if (!accounts[username] || accounts[username].password !== password) {
-    return res.status(401).json({ error: 'Invalid credentials' })
-  }
-
-  const account = accounts[username]
-  const sessionId = Math.random().toString(36).substr(2, 16)
-
-  res.json({
-    success: true,
-    sessionId,
-    username,
-    role: account.role,
-    message: 'Logged in successfully'
-  })
-})
-
-// WebSocket connection handler
 wss.on('connection', (ws) => {
-  const clientId = Math.random().toString(36).substr(2, 9)
-  let role = null
-  let sessionId = null
-  let username = null
+  const clientId = `client-${++clientCounter}`
+  console.log(`[${clientId}] Connected. Total clients: ${clients.size + 1}`)
 
-  console.log(`Client connected: ${clientId}`)
+  let role = null
+  let deviceId = null
+  let username = null
 
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data)
+      // Debug: log incoming message summary
+      console.log(`[${clientId}] recv:`, { type: msg.type, targetId: msg.targetId || msg.payload?.targetId || (msg.payload && msg.payload.desc && 'offer-desc') })
       const { type, payload } = msg
 
       if (type === 'register-teacher') {
         role = 'teacher'
-        username = payload.username || 'Teacher'
-        clients.teachers.set(clientId, { ws, clientId, role: 'teacher', username })
-        console.log(`Teacher registered: ${username} (${clientId})`)
+        username = payload?.username || 'Teacher'
+        clients.set(clientId, { ws, role, clientId, username })
+        console.log(`[${clientId}] Teacher registered: ${username}`)
+        
+        // Send registration confirmation and current device list
         ws.send(JSON.stringify({ type: 'registered', clientId, role: 'teacher' }))
         broadcastDeviceList()
-      } else if (type === 'register-student') {
+      }
+      else if (type === 'register-student') {
         role = 'student'
-        sessionId = payload.sessionId
-        username = payload.username
-
-        console.log(`[Student Registration] sessionId=${sessionId}, username=${username}`)
-
-        if (!sessionId || !username) {
-          console.log(`[ERROR] Invalid student registration - missing sessionId or username`)
-          ws.send(JSON.stringify({ type: 'error', message: 'Invalid session' }))
-          return
-        }
-
-        const deviceId = `DEV-${username}-${Date.now()}`
-        clients.students.set(deviceId, {
-          ws, clientId, sessionId, username, deviceId, role: 'student',
-          webcamAllowed: false, connectedAt: new Date().toISOString()
-        })
-        clients.sessionToDevice.set(sessionId, deviceId)
-
-        console.log(`Student registered: ${username} -> ${deviceId} (clientId: ${clientId})`)
-        ws.send(JSON.stringify({
-          type: 'registered', clientId: deviceId, role: 'student', deviceId, username
-        }))
+        username = payload?.username || 'Student'
+        deviceId = `device-${clientCounter}`
+        clients.set(clientId, { ws, role, clientId, username })
+        devices.set(deviceId, { id: deviceId, name: username, role: 'student', clientId })
+        console.log(`[${clientId}] Student registered: ${username} (${deviceId})`)
+        
+        // Send registration confirmation
+        ws.send(JSON.stringify({ type: 'registered', clientId, deviceId, role: 'student' }))
         broadcastDeviceList()
-      } else if (type === 'offer') {
-        const { targetId } = msg
-        
-        // Check if target is a student
-        if (clients.students.has(targetId)) {
-          const student = clients.students.get(targetId)
-          if (student.ws.readyState === WebSocket.OPEN) {
-            console.log(`[Offer] Teacher ${clientId} sending offer to student ${targetId}`)
-            student.ws.send(JSON.stringify({ type: 'offer', fromId: clientId, payload }))
-          }
-        } 
-        // Check if target is a teacher (student sending offer)
-        else if (clients.teachers.has(targetId)) {
-          const teacher = clients.teachers.get(targetId)
-          if (teacher.ws.readyState === WebSocket.OPEN) {
-            // Get device ID for this student if possible
-            const deviceId = clients.sessionToDevice.get(sessionId) || clientId
-            console.log(`[Offer] Student ${username} (${deviceId}) sending offer to teacher ${targetId}`)
-            teacher.ws.send(JSON.stringify({ type: 'offer', fromId: deviceId, payload }))
-          }
-        }
-        else {
-          console.log(`[WARN] Offer target not found: ${targetId}`)
-        }
-      } else if (type === 'answer') {
-        const { targetId } = msg
-        
-        // Determine sender info
-        let fromId = clientId
-        if (role === 'student' && sessionId) {
-          fromId = clients.sessionToDevice.get(sessionId) || clientId
-        }
-        
-        console.log(`[Answer] ${role} ${username} sending answer to targetId=${targetId}`)
-        
-        // Send to teacher
-        if (clients.teachers.has(targetId)) {
-          const teacher = clients.teachers.get(targetId)
-          if (teacher.ws.readyState === WebSocket.OPEN) {
-            console.log(`[Answer] Relaying answer to teacher ${targetId} from ${fromId}`)
-            teacher.ws.send(JSON.stringify({ type: 'answer', fromId, payload }))
-          }
-        } 
-        // Send to student
-        else if (clients.students.has(targetId)) {
-          const student = clients.students.get(targetId)
-          if (student.ws.readyState === WebSocket.OPEN) {
-            console.log(`[Answer] Relaying answer to student ${targetId} from ${fromId}`)
-            student.ws.send(JSON.stringify({ type: 'answer', fromId, payload }))
-          }
-        }
-        
-        // Mark student as allowed if teacher is requesting
-        if (role === 'student' && sessionId && fromId === clients.sessionToDevice.get(sessionId)) {
-          const device = clients.sessionToDevice.get(sessionId)
-          if (device && clients.students.has(device)) {
-            const student = clients.students.get(device)
-            student.webcamAllowed = true
-            console.log(`[Answer] Marked student ${device} as webcamAllowed=true`)
-            broadcastDeviceList()
-          }
-        }
-      } else if (type === 'answer-reject') {
-        const { targetId } = msg
-        
-        // Determine sender info
-        let fromId = clientId
-        if (role === 'student' && sessionId) {
-          fromId = clients.sessionToDevice.get(sessionId) || clientId
-        }
-        
-        console.log(`[Answer-Reject] ${role} ${username} rejecting request to targetId=${targetId}`)
-        
-        // Send to teacher
-        if (clients.teachers.has(targetId)) {
-          const teacher = clients.teachers.get(targetId)
-          if (teacher.ws.readyState === WebSocket.OPEN) {
-            teacher.ws.send(JSON.stringify({ type: 'answer-reject', fromId }))
-          }
-        } 
-        // Send to student
-        else if (clients.students.has(targetId)) {
-          const student = clients.students.get(targetId)
-          if (student.ws.readyState === WebSocket.OPEN) {
-            student.ws.send(JSON.stringify({ type: 'answer-reject', fromId }))
-          }
-        }
-      } else if (type === 'ice-candidate') {
-        const { targetId } = msg
-        
-        // Determine sender info
-        let fromId = clientId
-        if (role === 'student' && sessionId) {
-          fromId = clients.sessionToDevice.get(sessionId) || clientId
-        }
-        
-        // Send to student
-        if (clients.students.has(targetId)) {
-          const target = clients.students.get(targetId)
-          if (target && target.ws.readyState === WebSocket.OPEN) {
-            target.ws.send(JSON.stringify({ type: 'ice-candidate', fromId, payload }))
-          }
-        } 
-        // Send to teacher
-        else if (clients.teachers.has(targetId)) {
-          const target = clients.teachers.get(targetId)
-          if (target && target.ws.readyState === WebSocket.OPEN) {
-            target.ws.send(JSON.stringify({ type: 'ice-candidate', fromId, payload }))
-          }
+      }
+      else if (type === 'offer') {
+        // Route offer from teacher to student
+        const { targetId, payload: offerPayload } = msg
+        const targetClient = Array.from(clients.values()).find(c => 
+          devices.get(targetId)?.clientId === c.clientId
+        )
+        if (targetClient && targetClient.ws.readyState === WebSocket.OPEN) {
+          targetClient.ws.send(JSON.stringify({
+            type: 'offer',
+            fromId: clientId,
+            payload: offerPayload
+          }))
+          console.log(`[${clientId}] Sent offer to ${targetId}`)
         }
       }
-    } catch (e) {
-      console.error('Message error:', e)
+      else if (type === 'answer') {
+        // Route answer from student to teacher
+        const { targetId, payload: answerPayload } = msg
+        const targetClient = clients.get(targetId)
+        if (targetClient && targetClient.ws.readyState === WebSocket.OPEN) {
+          targetClient.ws.send(JSON.stringify({
+            type: 'answer',
+            fromId: deviceId || clientId,
+            payload: answerPayload
+          }))
+          console.log(`[${clientId}] Sent answer to ${targetId}`)
+        }
+      }
+      else if (type === 'answer-reject') {
+        // Route rejection from student to teacher
+        const { targetId } = msg
+        const targetClient = clients.get(targetId)
+        if (targetClient && targetClient.ws.readyState === WebSocket.OPEN) {
+          targetClient.ws.send(JSON.stringify({
+            type: 'answer-reject',
+            fromId: deviceId || clientId
+          }))
+          console.log(`[${clientId}] Sent rejection to ${targetId}`)
+        }
+      }
+      else if (type === 'ice-candidate') {
+        // Route ICE candidate
+        const { targetId, payload: candPayload } = msg
+        const targetClient = clients.get(targetId) || 
+          Array.from(clients.values()).find(c => devices.get(targetId)?.clientId === c.clientId)
+        if (targetClient && targetClient.ws.readyState === WebSocket.OPEN) {
+          targetClient.ws.send(JSON.stringify({
+            type: 'ice-candidate',
+            fromId: deviceId || clientId,
+            payload: candPayload
+          }))
+        }
+      }
+      else {
+        console.debug(`[${clientId}] Unknown message type: ${type}`)
+      }
+    } catch (err) {
+      console.error(`[${clientId}] Error processing message:`, err.message)
     }
   })
 
   ws.on('close', () => {
-    if (role === 'teacher') {
-      clients.teachers.delete(clientId)
-      console.log(`Teacher disconnected`)
-    } else if (role === 'student' && sessionId) {
-      const deviceId = clients.sessionToDevice.get(sessionId)
-      if (deviceId) {
-        clients.students.delete(deviceId)
-        clients.sessionToDevice.delete(sessionId)
-        console.log(`Student disconnected: ${sessionId} -> ${deviceId}`)
-      } else {
-        console.log(`Student disconnected (no device mapping): ${sessionId}`)
-      }
+    clients.delete(clientId)
+    if (deviceId) {
+      devices.delete(deviceId)
       broadcastDeviceList()
     }
+    console.log(`[${clientId}] Disconnected. Total clients: ${clients.size}`)
+  })
+
+  ws.on('error', (err) => {
+    console.error(`[${clientId}] WebSocket error:`, err.message)
   })
 })
 
-// Routes
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'login.html')))
-app.get('/login.html', (req, res) => res.sendFile(path.join(__dirname, 'login.html')))
-app.get('/teacher-dashboard.html', (req, res) => res.sendFile(path.join(__dirname, 'teacher-dashboard.html')))
-// Legacy routes for backward compatibility
-app.get('/concept.html', (req, res) => res.sendFile(path.join(__dirname, 'teacher-dashboard.html')))
-app.get('/student.html', (req, res) => res.sendFile(path.join(__dirname, 'student.html')))
-
-app.get('/api/devices', (req, res) => {
-  const devices = Array.from(clients.students.values()).map(s => ({
-    id: s.deviceId,
-    name: s.username,
-    status: 'active',
-    webcamAllowed: s.webcamAllowed || false,
-    connectedAt: s.connectedAt
-  }))
-  res.json(devices)
+// Root route
+app.get('/', (req, res) => {
+  res.sendFile(__dirname + '/login.html')
 })
 
-// Start server
-const HOST = process.env.HOST || '0.0.0.0'
-server.listen(PORT, HOST, () => {
-  // Print helpful access URLs including LAN IPs so students can connect
-  const nets = os.networkInterfaces()
-  const addresses = []
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name]) {
-      if (net.family === 'IPv4' && !net.internal) {
-        addresses.push(net.address)
-      }
-    }
-  }
-
-  console.log('\n=== CLS Monitor Server ===')
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`)
-  console.log(`Port: ${PORT}`)
-  console.log(`\nAccess URLs:`)
-  console.log(`  Local: http://localhost:${PORT}/`)
-  console.log(`  Teacher Dashboard: http://localhost:${PORT}/teacher-dashboard.html`)
-  console.log(`  Student Device: http://localhost:${PORT}/student.html`)
-  console.log(`  API Devices: http://localhost:${PORT}/api/devices`)
-  console.log(`  API Login: POST http://localhost:${PORT}/api/auth/login`)
-  if (addresses.length) {
-    console.log(`\n  Remote Access (LAN):`)
-    addresses.forEach(a => {
-      console.log(`    http://${a}:${PORT}/`)
-      console.log(`    http://${a}:${PORT}/teacher-dashboard.html`)
-      console.log(`    http://${a}:${PORT}/student.html`)
-    })
-  } else {
-    console.log('\nNo LAN IP detected; use localhost or check network')
-  }
-  console.log('\n=== Firewall Configuration ===')
-  console.log(`If students cannot reach the server, open Windows Firewall for TCP port ${PORT}:`)
-  console.log(`PowerShell (admin): New-NetFirewallRule -DisplayName 'CLS Monitor ${PORT}' -Direction Inbound -LocalPort ${PORT} -Protocol TCP -Action Allow`)
-  console.log('\n=== Test Credentials ===')
-  console.log('Teacher: username=teacher_01, password=password123')
-  console.log('Student: username=student_01, password=password123')
-  console.log('\n=== WebSocket Details ===')
-  console.log('WebSocket protocol: ws:// (or wss:// over HTTPS)')
-  console.log('Automatically detects HTTPS and uses secure WebSocket\n')
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`\n✅ CLS Monitor Server running on http://localhost:${PORT}`)
+  console.log(`📡 WebSocket signaling ready at ws://localhost:${PORT}`)
+  console.log(`🌐 Open http://localhost:${PORT} in your browser\n`)
 })

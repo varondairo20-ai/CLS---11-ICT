@@ -5,212 +5,133 @@
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>CLS Login</title>
     <link rel="stylesheet" href="styles.css">
+    <style>
+      body{display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+      .login-container{text-align:center;max-width:420px;padding:40px 20px;width:100%;background:rgba(255,255,255,0.02);border-radius:16px;border:1px solid rgba(255,255,255,0.04)}
+      .login-header{margin-bottom:30px}
+      .logo-icon{width:56px;height:56px;border-radius:12px;background:linear-gradient(135deg,#2563eb,#7c3aed);display:flex;align-items:center;justify-content:center;color:white;font-weight:800;font-size:24px;margin:0 auto 16px}
+      .login-header h1{margin:0 0 8px;font-size:28px;font-weight:800}
+      .login-header p{margin:0;color:var(--muted);font-size:14px}
+      .form-group{margin:16px 0;text-align:left}
+      .form-group label{display:block;margin:0 0 6px;font-size:13px;color:var(--muted);font-weight:500}
+      .form-group input,.form-group select{width:100%;padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:rgba(255,255,255,0.01);color:white;font-size:14px;outline:none}
+      .form-group input:focus,.form-group select:focus{border-color:var(--accent);background:rgba(37,99,235,0.05)}
+      .form-group select{cursor:pointer}
+      .btn-login{width:100%;padding:11px;margin-top:20px;border-radius:8px;border:none;background:var(--accent);color:white;font-weight:600;cursor:pointer;font-size:15px;transition:all 0.3s}
+      .btn-login:hover{box-shadow:0 8px 20px rgba(37,99,235,0.3);transform:translateY(-1px)}
+      .error{margin-top:12px;font-size:13px;color:#ef4444;display:none}
+      .success{margin-top:12px;font-size:13px;color:var(--success);display:none}
+      .demo-info{margin-top:20px;padding:12px;background:rgba(99,102,241,0.1);border-radius:8px;border:1px solid rgba(99,102,241,0.2);font-size:12px;color:var(--muted);line-height:1.5}
+    </style>
   </head>
   <body>
-    <main style="max-width:400px;margin:80px auto;text-align:center">
-      <h1>CLS Login</h1>
-      <p>Choose role to continue</p>
-      <div style="display:flex;gap:12px;justify-content:center;margin-top:18px">
-        <button class="btn" onclick="asTeacher()">Teacher</button>
-        <button class="btn secondary" onclick="asStudent()">Student</button>
-      </div>
-    </main>
-    <script>
-      function asTeacher(){
-        localStorage.setItem('role','teacher');
-        localStorage.setItem('username','Teacher');
-        window.location.href='teacher-dashboard.html'
-      }
-      function asStudent(){
-        localStorage.setItem('role','student');
-        localStorage.setItem('username','Student');
-        window.location.href='student.html'
-      }
-    </script>
-  </body>
-</html>
-      max-width:380px;
-      background:var(--card);
-      padding:26px;
-      border-radius:14px;
-      border:1px solid rgba(255,255,255,0.04);
-      box-shadow:0 20px 40px rgba(0,0,0,0.4);
-    }
-
-    .brand{
-      display:flex;
-      align-items:center;
-      gap:12px;
-      margin-bottom:20px;
-    }
-
-    .logo{
-      width:46px;
-      height:46px;
-      border-radius:10px;
-      background:linear-gradient(135deg,var(--accent),#7c3aed);
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      font-weight:700;
-      color:white;
-    }
-
-    h1{
-      font-size:18px;
-      margin:0;
-    }
-
-    .small{
-      font-size:13px;
-      color:var(--muted);
-    }
-
-    label{
-      display:block;
-      margin:14px 0 6px;
-      font-size:14px;
-      color:var(--muted);
-    }
-
-    input{
-      width:100%;
-      padding:10px 12px;
-      border-radius:10px;
-      border:1px solid rgba(255,255,255,0.06);
-      background:#071224;
-      color:white;
-      font-size:14px;
-      outline:none;
-    }
-
-    input:focus{
-      border-color:var(--accent);
-    }
-
-    .btn{
-      margin-top:18px;
-      width:100%;
-      padding:11px;
-      border-radius:10px;
-      border:none;
-      background:var(--accent);
-      color:white;
-      font-weight:600;
-      cursor:pointer;
-    }
-
-    .error{
-      margin-top:12px;
-      font-size:13px;
-      color:var(--danger);
-      display:none;
-    }
-
-    footer{
-      margin-top:18px;
-      text-align:center;
-      font-size:12px;
-      color:var(--muted);
-    }
-  </style>
-</head>
-
-<body>
-  <script>
-    // Auto-redirect if already logged in
-    (function(){
-      const role = localStorage.getItem('role');
-      if (role === 'teacher') {
-        window.location.href = '/teacher-dashboard.html';
-      } else if (role === 'student') {
-        window.location.href = '/student.html';
-      }
-    })();
-  </script>
-  <div class="login-card">
-    <div class="brand">
-      <div class="logo">CLS</div>
-      <div>
+    <div class="login-container">
+      <div class="logo-icon">CLS</div>
+      <div class="login-header">
         <h1>CLS Monitor</h1>
-        <div class="small">Login</div>
+        <p>Classroom Live Supervision</p>
+      </div>
+
+      <!-- Login Form -->
+      <form id="loginForm" class="form-section active" onsubmit="handleLogin(event)">
+        <div class="form-group">
+          <label for="loginUsername">Username</label>
+          <input id="loginUsername" type="text" placeholder="Enter username" required>
+        </div>
+
+        <div class="form-group">
+          <label for="loginPassword">Password</label>
+          <input id="loginPassword" type="password" placeholder="Enter password" required>
+        </div>
+
+        <div class="form-group">
+          <label for="loginRole">Role</label>
+          <select id="loginRole" required>
+            <option value="">Select role...</option>
+            <option value="teacher">👨‍🏫 Teacher</option>
+            <option value="student">👨‍💻 Student</option>
+          </select>
+        </div>
+
+        <button type="submit" class="btn-login">Login</button>
+      </form>
+
+      <div class="error" id="errorMsg"></div>
+      <div class="success" id="successMsg"></div>
+
+      <div class="demo-info">
+        <strong>Need Help?</strong><br>
+        <span id="demoHelpText">Create a new account using the Register tab.</span>
       </div>
     </div>
 
-    <label for="username">Username</label>
-    <input id="username" type="text" placeholder="Enter username">
-
-    <label for="password">Password</label>
-    <input id="password" type="password" placeholder="Enter password">
-
-    <button class="btn" onclick="login()">Login</button>
-
-    <div class="error" id="errorMsg"></div>
-
-    <footer>
-      Teachers and students use the same login.<br>
-      You will be directed to your dashboard after login.
-    </footer>
-  </div>
-
-  <script>
-    function showError(msg) {
-      const errEl = document.getElementById('errorMsg')
-      errEl.textContent = msg
-      errEl.style.display = 'block'
-    }
-
-    function hideError() {
-      document.getElementById('errorMsg').style.display = 'none'
-    }
-
-    async function login() {
-      const user = document.getElementById('username').value.trim()
-      const pass = document.getElementById('password').value.trim()
-      
-      if (!user || !pass) {
-        showError('Username and password required')
-        return
+    <script>
+      function showError(msg) {
+        const errEl = document.getElementById('errorMsg')
+        const successEl = document.getElementById('successMsg')
+        errEl.textContent = msg
+        errEl.style.display = 'block'
+        successEl.style.display = 'none'
       }
 
-      try {
-        const res = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: user, password: pass })
-        })
-        
-        const data = await res.json()
-        if (!res.ok) {
-          showError(data.error || 'Login failed')
+      function showSuccess(msg) {
+        const successEl = document.getElementById('successMsg')
+        const errEl = document.getElementById('errorMsg')
+        successEl.textContent = msg
+        successEl.style.display = 'block'
+        errEl.style.display = 'none'
+      }
+
+      function hideMessages() {
+        document.getElementById('errorMsg').style.display = 'none'
+        document.getElementById('successMsg').style.display = 'none'
+      }
+
+      function handleLogin(e) {
+        e.preventDefault()
+        hideMessages()
+
+        const username = document.getElementById('loginUsername').value.trim()
+        const password = document.getElementById('loginPassword').value.trim()
+        const role = document.getElementById('loginRole').value
+
+        if (!username || !password || !role) {
+          showError('All fields are required')
           return
         }
-        
-        // Login successful - store credentials and redirect based on role
-        localStorage.setItem('role', data.role)
-        localStorage.setItem('username', data.username)
-        localStorage.setItem('sessionId', data.sessionId)
-        localStorage.setItem('loginTime', new Date().toISOString())
-        
-        hideError()
-        
-        // Redirect based on role
-        if (data.role === 'teacher') {
-          window.location.href = '/teacher-dashboard.html'
-        } else {
-          window.location.href = '/student.html'
-        }
-      } catch (e) {
-        showError('Error: ' + e.message)
-      }
-    }
 
-    // Allow Enter key to login
-    document.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') {
-        login()
+        // Call backend login endpoint
+        fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password, role })
+        })
+        .then(res => res.json())
+        .then(data => {
+          if (data.error) {
+            showError(data.error)
+          } else {
+            localStorage.clear()
+            localStorage.setItem('role', role)
+            localStorage.setItem('username', data.username)
+            localStorage.setItem('sessionId', data.sessionId)
+            localStorage.setItem('loginTime', new Date().toISOString())
+            showSuccess(`Welcome, ${data.username}! Redirecting...`)
+            setTimeout(() => {
+              window.location.href = role === 'teacher' ? 'teacher-dashboard.html' : 'student.html'
+            }, 500)
+          }
+        })
+        .catch(err => showError('Connection error: ' + err.message))
       }
-    })
-  </script>
-</body>
+
+      // Allow Enter key to submit
+      document.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+          const form = document.querySelector('form')
+          if (form) form.dispatchEvent(new Event('submit'))
+        }
+      })
+    </script>
+  </body>
 </html>

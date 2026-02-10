@@ -1,145 +1,65 @@
-# CLS Monitor - Classroom Monitoring System
+# CLS Monitor — WebRTC Screen Sharing
 
-A WebRTC-based classroom monitoring system allowing teachers to supervise student screens in real-time. Works on local networks and supports remote deployment.
+A real-time classroom screen-sharing system built with HTML5, WebRTC, and Node.js signaling.
 
 ## Quick Start
 
 ### Prerequisites
-- Node.js v14+
-- npm
-- Windows/macOS/Linux
 
-### Installation
-```bash
-npm install
-```
+1. **MySQL Server** — See [DB_SETUP.md](./DB_SETUP.md) for installation
+2. **Node.js 18+** — [Download](https://nodejs.org/)
 
-### Running the Server
-```bash
-npm start
-```
+### Local Development (2 browsers)
 
-The server will start on port 3000 and display all available access URLs.
+1. **Login page** (`login.html`)
+   - Register new users (username, password, role)
+   - Credentials stored securely in MySQL with bcrypt hashing
+   - Choose "Teacher" or "Student" role
 
-### Default Accounts (In-Memory)
-- **Teacher:** `teacher_01` / `password123`
-- **Student 1:** `student_01` / `password123`
-- **Student 2:** `student_02` / `password123`
+2. **Teacher Dashboard** (`teacher-dashboard.html`)
+   - Connect automatically to signaling server
+   - View registered student devices
+   - Click "Request Screen" to initiate a screen-sharing request
+   - Watch incoming video in fullscreen viewer
 
-## Access URLs
+3. **Student Page** (`student.html`)
+   - Connect automatically to signaling server
+   - When teacher requests, a modal appears asking for approval
+   - Click "Approve & Share" to grant access
+   - Teacher will see your display in real-time
 
-### Local Machine
-- **Login:** `http://localhost:3000/`
-- **Teacher Dashboard:** `http://localhost:3000/teacher-dashboard.html`
-- **Student Device:** `http://localhost:3000/student.html`
-- **API (Devices):** `http://localhost:3000/api/devices`
+### Files
 
-### Network/Remote (Replace with your server IP or domain)
-- **Login:** `http://<SERVER_IP>:3000/`
-- **Teacher Dashboard:** `http://<SERVER_IP>:3000/teacher-dashboard.html`
-- **Student Device:** `http://<SERVER_IP>:3000/student.html`
+- `login.html` — Role selector (Teacher / Student)
+- `teacher-dashboard.html` — Teacher control panel
+- `student.html` — Student client with screen-sharing capability
+- `styles.css` — Shared dark-theme styling
+- Signaling server at `wss://cls-11-ict.onrender.com` (auto-configured)
 
-## Features
+### Features
 
-✅ Unified authentication (Teacher & Student roles)  
-✅ Real-time WebSocket signaling  
-✅ WebRTC peer-to-peer screen sharing  
-✅ Live teacher dashboard with device status  
-✅ Role-based access control  
-✅ Cross-platform browser support  
-✅ LAN network access with automatic IP detection  
-✅ Firewall-friendly configuration  
+- **Bidirectional WebRTC** — Offer/Answer/ICE exchange
+- **Status Indicators** — Real-time connection badges
+- **Exponential Backoff** — Automatic reconnection with increasing delays
+- **Toast Notifications** — Error/success messages
+- **Display Media API** — getDisplayMedia for screen capture
 
-## Development
+### Deployment
 
-```bash
-npm run dev  # Run with nodemon for live reload
-```
+Ensure a Node.js signaling server is running that accepts:
+- `register-teacher` messages
+- `register-student` messages  
+- Relay of `offer`, `answer`, `ice-candidate` messages
 
-## Deployment
+The default signaling endpoint is configured in each HTML file's `<meta name="signal-server">` tag.
 
-### For Local Network Only (Recommended for Classrooms)
+### Browser Compatibility
 
-1. **Configure Server (Optional)**
-   ```bash
-   # Edit .env file
-   PORT=3000
-   HOST=0.0.0.0
-   NODE_ENV=production
-   ```
+Requires:
+- WebRTC support (Chrome, Firefox, Safari, Edge)
+- Display Media API (Chrome 72+, Firefox 66+, Safari 13+)
 
-2. **Start Server**
-   ```bash
-   npm start
-   ```
+---
 
-3. **Students Connect Using**
-   - Get server IP: `ipconfig` (Windows) or `ifconfig` (macOS/Linux)
-   - URL: `http://<SERVER_IP>:3000/`
-
-4. **Allow Firewall Access (Windows)**
-   ```powershell
-   New-NetFirewallRule -DisplayName 'CLS Monitor 3000' -Direction Inbound -LocalPort 3000 -Protocol TCP -Action Allow
-   ```
-
-### For Remote Access (Over Internet)
-
-⚠️ **For secure remote access, use one of these methods:**
-
-#### Option A: Vercel (Easiest - Free)
-Deploy instantly to Vercel with automatic HTTPS:
-1. Create account at https://vercel.com
-2. Connect your GitHub repository
-3. Click "Deploy" - that's it!
-4. Access via: `https://your-project.vercel.app/`
-5. Share URL with students worldwide
-
-**Best for:** Quick internet access without configuration
-
-#### Option B: Cloud Server (Traditional)
-1. Deploy to AWS, DigitalOcean, Heroku, or similar
-2. Configure HTTPS with Let's Encrypt (free SSL)
-3. Update `.env`: `NODE_ENV=production`
-4. Access via domain name: `https://yourdomain.com/`
-
-**Best for:** Production use with custom domain
-
-#### Option C: Ngrok (Quick Testing)
-```bash
-# Install from https://ngrok.com
-ngrok http 3000
-# Share the provided URL with students
-```
-
-**Best for:** Quick testing without deployment
-
-
-#### Option C: Reverse Proxy (Nginx/Apache)
-Set up a reverse proxy with SSL termination:
-```nginx
-server {
-    listen 443 ssl;
-    server_name yourdomain.com;
-    
-    location / {
-        proxy_pass http://localhost:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-```
-
-For detailed deployment and troubleshooting, see [DEPLOYMENT.md](DEPLOYMENT.md)
-
-## Architecture
-- **Frontend:** HTML5, JavaScript, WebRTC
-- **Backend:** Node.js, Express, WebSocket
-- **Storage:** In-memory (no database)
-
-## Notes
-
-- This is a development prototype using in-memory storage
-- Accounts are hardcoded and reset on server restart
-- For production, add a proper database and authentication system
+Built for real-time classroom monitoring and student screen sharing.
 

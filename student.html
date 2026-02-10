@@ -5,8 +5,18 @@
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>Student — CLS</title>
     <link rel="stylesheet" href="styles.css">
+    <meta name="signal-server" content="wss://cls-11-ict.onrender.com">
   </head>
   <body>
+  <!-- Auth guard: redirect if not logged in -->
+  <script>
+    (function(){
+      const role = (localStorage.getItem('role')||'').toLowerCase()
+      if(!role || role !== 'student'){
+        window.location.href = 'login.html'
+      }
+    })()
+  </script>
     <header>
       <div class="brand">
         <div class="logo">CLS</div>
@@ -15,416 +25,198 @@
           <div class="small">Student client</div>
         </div>
       </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <span id="stuStatus" class="status-badge disconnected">Disconnected</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <button class="btn" onclick="logout()" style="background:#ef4444">Logout</button>
+      </div>
     </header>
+
     <main>
       <section style="max-width:760px;margin:24px auto;padding:12px">
         <h2>Your Screen</h2>
-        <p>This is the student page placeholder for the screen share client.</p>
+        <p>Your screen can be viewed by your teacher when requested.</p>
         <video id="localPreview" autoplay playsinline style="width:100%;height:360px;background:#051224;border-radius:8px"></video>
+
+        <div id="requestModal" style="margin-top:20px;padding:16px;border-radius:12px;border:2px solid #fbbf24;background:rgba(251,191,36,0.05);display:none">
+          <h3 style="margin:0 0 12px">Teacher Request</h3>
+          <p style="margin:0 0 12px">Your teacher is requesting to view your screen.</p>
+          <div style="display:flex;gap:8px">
+            <button class="btn secondary" onclick="denyScreenShare()">Deny</button>
+            <button class="btn" style="background:#10b981" onclick="approveScreenShare()">Approve & Share</button>
+          </div>
+        </div>
+
+        <!-- Proactive share removed; students only respond to teacher requests -->
       </section>
     </main>
+
     <script>
-      async function startPreview(){
-        try{
-          const s = await navigator.mediaDevices.getDisplayMedia({video:true})
-          const v = document.getElementById('localPreview')
-          v.srcObject = s
-        }catch(e){ console.warn('Preview failed', e) }
+      // Prefer local signaling when testing on localhost, otherwise use meta or fallback
+      const SIGNALING = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+        ? `ws://${window.location.host}`
+        : (document.querySelector('meta[name="signal-server"]')?.content || 'wss://cls-11-ict.onrender.com')
+      const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+      let ws = null, clientId = null, pc = null, reconnectAttempts = 0
+      const MAX_BACKOFF = 16000
+      const pcs = new Map()
+      let pendingOffer = null
+      let activeSharedStream = null
+
+      function setStuStatus(connected, text){
+        const el = document.getElementById('stuStatus')
+        if(!el) return
+        if(connected){ el.classList.remove('disconnected'); el.classList.add('connected'); el.textContent = text||'Connected' }
+        else { el.classList.remove('connected'); el.classList.add('disconnected'); el.textContent = text||'Disconnected' }
       }
-      document.addEventListener('DOMContentLoaded', startPreview)
+
+      function showToast(msg, isError=false, timeout=3000){
+        const t = document.createElement('div'); t.className = 'toast' + (isError?' error':''); t.textContent = msg; document.body.appendChild(t)
+        setTimeout(()=>{ t.style.opacity = '0'; setTimeout(()=>t.remove(),350) }, timeout)
+      }
+
+      function initWS(){
+        ws = new WebSocket(SIGNALING)
+        setStuStatus(false, 'Connecting...')
+        ws.onopen = ()=>{
+          console.log('ws open ->', SIGNALING)
+          reconnectAttempts=0; setStuStatus(true,'Connected'); showToast('Signaling connected')
+          const name = localStorage.getItem('username') || ('student-'+Math.floor(Math.random()*9000+1000))
+          // send payload object (server expects msg.payload.username)
+          ws.send(JSON.stringify({ type: 'register-student', payload: { username: name } }))
+          localStorage.setItem('username', name)
+        }
+        ws.onmessage = e=>{
+          try{
+            const msg = JSON.parse(e.data)
+            console.log('ws message ->', msg)
+            handleSignal(msg)
+          }catch(err){console.error('ws message parse', err)}
+        }
+        ws.onerror = (err)=>{ console.error('ws error', err); showToast('WebSocket error', true) }
+        ws.onclose = ()=>{
+          setStuStatus(false,'Disconnected'); showToast('Disconnected', true)
+          reconnectAttempts++; const backoff = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_BACKOFF)
+          setTimeout(initWS, backoff)
+        }
+      }
+
+      async function handleSignal(msg){
+        console.log('student ws message ->', msg)
+        if(msg.type === 'offer'){
+          // payload is expected as { desc: <RTCDesc>, meta: { mode } }
+          const fromId = msg.fromId
+          const payload = msg.payload || {}
+          const offer = payload.desc
+          const meta = payload.meta || { mode: 'screen' }
+          console.log('received offer from', fromId, 'meta', meta)
+          handleOffer(fromId, offer, meta)
+        }
+        else if(msg.type === 'ice-candidate'){
+          try{
+            if(pc && msg.payload){
+              // payload may be { candidate, meta } or just candidate
+              const candidate = msg.payload.candidate || msg.payload
+              console.log('adding ICE candidate', candidate)
+              await pc.addIceCandidate(new RTCIceCandidate(candidate))
+            }
+          }catch(e){ console.warn('ice error', e) }
+        }
+      }
+
+      function handleOffer(fromId, offer, meta){
+        pendingOffer = { fromId, offer, meta }
+        const modal = document.getElementById('requestModal')
+        if(modal){
+          const modeText = meta.mode === 'webcam' ? 'webcam' : 'screen'
+          modal.querySelector('h3').textContent = 'Teacher Request'
+          modal.querySelector('p').textContent = `Your teacher is requesting to view your ${modeText}.`
+          modal.style.display = 'block'
+        }
+      }
+
+      async function approveScreenShare(){
+        if(!pendingOffer || !ws) return
+        const { fromId, offer, meta } = pendingOffer
+        try{
+          pc = new RTCPeerConnection(RTC_CONFIG)
+          pcs.set(fromId, pc)
+          await pc.setRemoteDescription(new RTCSessionDescription(offer))
+          let stream
+          try{
+            if(meta && meta.mode === 'webcam'){
+              stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+            } else {
+              stream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+            }
+          }catch(permErr){
+            console.error('Permission denied or device not found:', permErr.message)
+            // send rejection if user denied
+            ws.send(JSON.stringify({type:'answer-reject', targetId: fromId}))
+            const modal = document.getElementById('requestModal'); if(modal) modal.style.display = 'none'
+            showToast('Permission denied or device not found', true)
+            pendingOffer = null
+            return
+          }
+          stream.getTracks().forEach(t=>pc.addTrack(t, stream))
+          const v = document.getElementById('localPreview'); v.srcObject = stream
+          pc.onicecandidate = ev => { if(ev.candidate) ws.send(JSON.stringify({type:'ice-candidate', targetId: fromId, payload: { candidate: ev.candidate, meta } })) }
+          const answer = await pc.createAnswer()
+          await pc.setLocalDescription(answer)
+          console.log('sending answer ->', { targetId: fromId, payload: { answer, meta } })
+          ws.send(JSON.stringify({type:'answer', targetId: fromId, payload: { answer, meta } }))
+          const modal = document.getElementById('requestModal'); if(modal) modal.style.display = 'none'
+          stream.getTracks().forEach(track => { track.onended = ()=>{ v.srcObject=null; pc.close(); pcs.delete(fromId) } })
+        }catch(err){ console.error(err); showToast(err.message, true) }
+        pendingOffer = null
+      }
+
+      function denyScreenShare(){
+        if(!pendingOffer || !ws) return
+        const { fromId } = pendingOffer
+        ws.send(JSON.stringify({type:'answer-reject', targetId: fromId}))
+        const modal = document.getElementById('requestModal'); if(modal) modal.style.display = 'none'
+        pendingOffer = null
+      }
+
+      document.addEventListener('DOMContentLoaded', ()=>{ if(!localStorage.getItem('username')) localStorage.setItem('username','Student'); initWS() })
+
+      function logout(){
+        const sessionId = localStorage.getItem('sessionId')
+        // Call logout API to record logout time
+        if (sessionId) {
+          fetch('/api/logout', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId })
+          }).catch(e => console.warn('Logout API error:', e))
+        }
+        localStorage.clear()
+        window.location.href = 'login.html'
+      }
+
+      // Auto-logout student when page is closed/unloaded
+      window.addEventListener('beforeunload', ()=>{
+        const role = localStorage.getItem('role')
+        if(role === 'student'){
+          const sessionId = localStorage.getItem('sessionId')
+          // Send logout signal to server API (fire and forget)
+          if (sessionId) {
+            fetch('/api/logout', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sessionId }),
+              keepalive: true
+            }).catch(e => console.warn('Logout API error:', e))
+          }
+          // Also send WebSocket logout if connected
+          if(ws && ws.readyState === WebSocket.OPEN){
+            ws.send(JSON.stringify({type:'logout', sessionId}))
+          }
+          localStorage.clear()
+        }
+      })
     </script>
   </body>
-</html>
-        <p class="small">Your screen can be viewed by your teacher when requested.</p>
-        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <div style="color:var(--muted)">Logged in at: <strong id="loginTime">—</strong></div>
-          <div style="flex:1"></div>
-          <div style="color:var(--muted)">Status: <strong id="connectionStatus">Connecting...</strong></div>
-        </div>
-      </div>
-
-      <div id="status" style="margin-top:12px;color:var(--muted);padding:12px;border-radius:8px;background:rgba(37,99,235,0.1);border:1px solid rgba(37,99,235,0.2);display:none"></div>
-      <div id="requestModal" style="margin-top:20px;padding:16px;border-radius:12px;border:2px solid #fbbf24;background:rgba(251,191,36,0.05);display:none">
-        <h3 style="margin:0 0 12px">Teacher Request</h3>
-        <p style="margin:0 0 12px">Your teacher is requesting to view your screen.</p>
-        <div style="display:flex;gap:8px">
-          <button class="btn secondary" onclick="denyScreenShare()">Deny</button>
-          <button class="btn" style="background:#10b981" onclick="approveScreenShare()">Approve & Share</button>
-        </div>
-      </div>
-
-      <!-- Student can also request to share -->
-      <div style="margin-top:20px;padding:16px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.02)">
-        <h3 style="margin:0 0 8px">Share Your Screen with Teacher</h3>
-        <p style="margin:0 0 12px;color:var(--muted);font-size:0.9em">Proactively share your screen with your teacher.</p>
-        <button class="btn" style="background:#3b82f6" onclick="requestToShare()">Request to Share Screen</button>
-      </div>
-    </section>
-  </main>
-
-  <script>
-    let ws = null
-    let deviceId = null
-    let clientId = null
-    const peerConnections = new Map()
-    let pendingOffer = null
-    let activeSharedStream = null
-
-    const RTCConfig = {
-      iceServers: [
-        { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
-      ]
-    }
-
-    // populate student name (deferred to DOM ready)
-    function populateStudentName() {
-      const name = localStorage.getItem('username') || 'Student'
-      const el = document.getElementById('studentName')
-      if(el) el.textContent = name
-    }
-
-    function logout(){
-      localStorage.removeItem('role')
-      localStorage.removeItem('username')
-      localStorage.removeItem('sessionId')
-      localStorage.removeItem('loginTime')
-      if(ws) ws.close()
-      window.location.href = 'login.html'
-    }
-
-    // populate login time
-    function populateLoginTime() {
-      const raw = localStorage.getItem('loginTime')
-      const el = document.getElementById('loginTime')
-      if(el){
-        try{
-          el.textContent = raw ? new Date(raw).toLocaleString() : '—'
-        }catch(e){ el.textContent = raw }
-      }
-    }
-
-    // Initialize WebSocket connection
-    function initWebSocket() {
-      const configured = document.querySelector('meta[name="signal-server"]').getAttribute('content') || ''
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const host = configured.trim() || window.location.host
-      const wsUrl = `${protocol}//${host}`
-      console.log('Attempting WebSocket connection to:', wsUrl)
-      ws = new WebSocket(wsUrl)
-      
-      ws.onopen = () => {
-        console.log('WebSocket connected')
-        updateStatus('Connected', '#10b981')
-        
-        // Register as student
-        const sessionId = localStorage.getItem('sessionId')
-        const username = localStorage.getItem('username') || 'Student'
-        console.log('Registering student:', { sessionId, username })
-        
-        if (!sessionId) {
-          console.warn('WARNING: No sessionId in localStorage! User must login first.')
-          updateStatus('Error: Not logged in', '#ef4444')
-          return
-        }
-        
-        ws.send(JSON.stringify({
-          type: 'register-student',
-          payload: { sessionId, username }
-        }))
-      }
-      
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data)
-          handleSignalingMessage(msg)
-        } catch (e) {
-          console.error('Invalid JSON from WebSocket:', e, '\nRaw data:', event.data)
-          // If HTML was returned (e.g. server sent an error page), show it in the status
-          if (typeof event.data === 'string' && event.data.trim().startsWith('<')) {
-            updateStatus('Server returned HTML (check server logs)', '#ef4444')
-          }
-        }
-      }
-      ws.onerror = (err) => {
-        console.error('WebSocket error:', err)
-        updateStatus('Connection Error', '#ef4444')
-      }
-      ws.onclose = () => {
-        console.log('WebSocket disconnected, reconnecting...')
-        updateStatus('Disconnected', '#ef4444')
-        setTimeout(initWebSocket, 3000)
-      }
-    }
-
-    function handleSignalingMessage(msg) {
-      const { type, fromId, payload } = msg
-      
-      if (type === 'registered') {
-        deviceId = msg.deviceId
-        clientId = msg.clientId
-        console.log('Student registered as:', deviceId, 'clientId:', clientId, msg)
-        updateStatus('Ready', '#10b981')
-      }
-      else if (type === 'error') {
-        console.error('Server error:', msg.message)
-        updateStatus('Error: ' + msg.message, '#ef4444')
-      }
-      else if (type === 'offer') {
-        handleOffer(fromId, payload)
-      }
-      else if (type === 'answer') {
-        handleAnswer(fromId, payload)
-      }
-      else if (type === 'answer-reject') {
-        handleAnswerReject(fromId)
-      }
-      else if (type === 'ice-candidate') {
-        handleIceCandidate(fromId, payload)
-      }
-    }
-
-    function handleOffer(fromId, offer) {
-      console.log('Received offer from teacher:', fromId)
-      pendingOffer = { fromId, offer }
-      
-      // Show request modal
-      const modal = document.getElementById('requestModal')
-      if(modal) modal.style.display = 'block'
-      
-      updateStatus('Teacher requesting access...', '#fbbf24')
-    }
-
-    async function approveScreenShare() {
-      if (!pendingOffer || !ws) return
-      
-      const { fromId, offer } = pendingOffer
-      
-      try {
-        const peerConnection = new RTCPeerConnection(RTCConfig)
-        peerConnections.set(fromId, peerConnection)
-        
-        // Set remote offer
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
-        
-        // Capture user's screen
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: { cursor: 'always' },
-          audio: false
-        })
-        
-        stream.getTracks().forEach(track => {
-          peerConnection.addTrack(track, stream)
-        })
-        
-        peerConnection.onicecandidate = (event) => {
-          if (event.candidate) {
-            ws.send(JSON.stringify({
-              type: 'ice-candidate',
-              targetId: fromId,
-              payload: event.candidate
-            }))
-          }
-        }
-        
-        peerConnection.ontrack = (event) => {
-          console.log('Received remote track:', event.track.kind)
-        }
-        
-        // Create and send answer
-        const answer = await peerConnection.createAnswer()
-        await peerConnection.setLocalDescription(answer)
-        
-        ws.send(JSON.stringify({
-          type: 'answer',
-          targetId: fromId,
-          payload: answer
-        }))
-        
-        console.log('Screen share approved and answer sent')
-        updateStatus('Sharing screen', '#10b981')
-        
-        // Hide modal
-        const modal = document.getElementById('requestModal')
-        if(modal) modal.style.display = 'none'
-        
-        // Close stream when done
-        stream.getTracks().forEach(track => {
-          track.onended = () => {
-            console.log('Stream ended')
-            updateStatus('Ready', '#10b981')
-            peerConnection.close()
-            peerConnections.delete(fromId)
-          }
-        })
-        
-      } catch (err) {
-        console.error('Error approving screen share:', err)
-        updateStatus('Error: ' + err.message, '#ef4444')
-      }
-      
-      pendingOffer = null
-    }
-
-    function denyScreenShare() {
-      if (!pendingOffer || !ws) return
-      
-      const { fromId } = pendingOffer
-      
-      ws.send(JSON.stringify({
-        type: 'answer-reject',
-        targetId: fromId
-      }))
-      
-      console.log('Screen share request denied')
-      updateStatus('Ready', '#10b981')
-      
-      // Hide modal
-      const modal = document.getElementById('requestModal')
-      if(modal) modal.style.display = 'none'
-      
-      pendingOffer = null
-    }
-
-    // Student initiates screen share request to teacher
-    async function requestToShare() {
-      if (!ws || !clientId) {
-        alert('Not connected to teacher. Please wait...')
-        return
-      }
-
-      try {
-        updateStatus('Requesting to share...', '#fbbf24')
-        
-        const peerConnection = new RTCPeerConnection(RTCConfig)
-        peerConnections.set(clientId, peerConnection)
-        
-        // Capture user's screen
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: { cursor: 'always' },
-          audio: false
-        })
-        
-        activeSharedStream = stream
-        
-        // Add tracks to peer connection
-        stream.getTracks().forEach(track => {
-          peerConnection.addTrack(track, stream)
-        })
-        
-        peerConnection.onicecandidate = (event) => {
-          if (event.candidate && ws) {
-            ws.send(JSON.stringify({
-              type: 'ice-candidate',
-              targetId: clientId,
-              payload: event.candidate
-            }))
-          }
-        }
-        
-        // Create offer
-        const offer = await peerConnection.createOffer()
-        await peerConnection.setLocalDescription(offer)
-        
-        ws.send(JSON.stringify({
-          type: 'offer',
-          targetId: clientId,
-          payload: offer
-        }))
-        
-        console.log('Screen share request sent to teacher')
-        updateStatus('Waiting for teacher approval...', '#fbbf24')
-        
-        // Handle stream ending
-        stream.getTracks().forEach(track => {
-          track.onended = () => {
-            console.log('Stream ended by user')
-            peerConnection.close()
-            peerConnections.delete(clientId)
-            activeSharedStream = null
-            updateStatus('Ready', '#10b981')
-          }
-        })
-        
-      } catch (err) {
-        console.error('Error requesting to share:', err)
-        updateStatus('Ready', '#10b981')
-        if (err.name !== 'NotAllowedError') {
-          alert('Error: ' + err.message)
-        }
-      }
-    }
-
-    async function handleAnswer(fromId, answer) {
-      const peerConnection = peerConnections.get(fromId)
-      if (peerConnection) {
-        try {
-          console.log('Answer received from teacher:', fromId)
-          await peerConnection.setRemoteDescription(new RTCSessionDescription(answer))
-        } catch (err) {
-          console.error('Error setting remote description:', err)
-        }
-      }
-    }
-
-    function handleAnswerReject(fromId) {
-      const peerConnection = peerConnections.get(fromId)
-      if (peerConnection) {
-        peerConnection.close()
-        peerConnections.delete(fromId)
-      }
-      
-      // Stop sharing if it was our request
-      if (activeSharedStream) {
-        activeSharedStream.getTracks().forEach(track => track.stop())
-        activeSharedStream = null
-      }
-      
-      updateStatus('Ready', '#10b981')
-      console.log('Teacher rejected screen share request')
-    }
-
-    async function handleIceCandidate(fromId, candidate) {
-      const peerConnection = peerConnections.get(fromId)
-      if (peerConnection && candidate) {
-        try {
-          await peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
-        } catch (err) {
-          console.error('Error adding ICE candidate:', err)
-        }
-      }
-    }
-
-    function updateStatus(text, color) {
-      const el = document.getElementById('connectionStatus')
-      if(el) {
-        el.textContent = text
-        el.style.color = color
-      } else {
-        console.warn('connectionStatus element not found!')
-      }
-    }
-
-    // Start immediately
-    console.log('Student.html script loaded')
-    
-    // Wait for DOM to be ready before initializing WebSocket
-    function startWhenReady() {
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => {
-          console.log('DOM ready, initializing')
-          populateStudentName()
-          populateLoginTime()
-          initWebSocket()
-        })
-      } else {
-        console.log('DOM already loaded, initializing')
-        populateStudentName()
-        populateLoginTime()
-        initWebSocket()
-      }
-    }
-    
-    startWhenReady()
-  </script>
-</body>
 </html>

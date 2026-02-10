@@ -5,8 +5,18 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>CLS Monitor — Teacher</title>
   <link rel="stylesheet" href="styles.css">
+  <meta name="signal-server" content="wss://cls-11-ict.onrender.com">
 </head>
 <body>
+  <!-- Auth guard: redirect if not logged in -->
+  <script>
+    (function(){
+      const role = (localStorage.getItem('role')||'').toLowerCase()
+      if(!role || role !== 'teacher'){
+        window.location.href = 'login.html'
+      }
+    })()
+  </script>
   <!-- Simplified teacher dashboard (only static UI) -->
   <header>
     <div class="brand">
@@ -18,6 +28,10 @@
     </div>
     <div class="controls">
       <div class="small">Logged in as <strong id="loggedInUser">Teacher</strong></div>
+      <div id="connStatus" style="display:flex;align-items:center;gap:8px">
+        <span id="statusBadge" class="status-badge disconnected">Disconnected</span>
+      </div>
+      <button class="btn" onclick="showLogs()" style="background:#8b5cf6">📋 Logs</button>
       <button class="btn" onclick="logout()">Logout</button>
     </div>
   </header>
@@ -28,11 +42,222 @@
     </section>
   </main>
 
+  <div id="viewer" style="display:none;position:fixed;inset:0;background:#000;align-items:center;justify-content:center;z-index:200">
+    <video id="remoteVideo" autoplay playsinline style="max-width:100%;max-height:100%"></video>
+    <button onclick="closeViewer()" style="position:absolute;top:14px;right:14px;padding:8px 10px;border-radius:8px">Close</button>
+  </div>
+
+  <!-- Activity Logs Modal -->
+  <div id="logsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);align-items:center;justify-content:center;z-index:300;padding:20px">
+    <div style="background:#0f172a;border:1px solid rgba(255,255,255,0.1);border-radius:12px;width:100%;max-width:800px;max-height:600px;overflow:auto;padding:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+        <h2 style="margin:0">Student Activity Logs</h2>
+        <button onclick="closeLogs()" style="padding:8px 12px;border-radius:6px;border:none;background:#ef4444;color:white;cursor:pointer">Close</button>
+      </div>
+      <div id="logsContent" style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:14px">
+          <thead>
+            <tr style="border-bottom:2px solid rgba(255,255,255,0.2)">
+              <th style="text-align:left;padding:10px;color:var(--muted)">Username</th>
+              <th style="text-align:left;padding:10px;color:var(--muted)">Time In</th>
+              <th style="text-align:left;padding:10px;color:var(--muted)">Time Out</th>
+              <th style="text-align:left;padding:10px;color:var(--muted)">Duration</th>
+            </tr>
+          </thead>
+          <tbody id="logsTable">
+            <tr><td colspan="4" style="padding:20px;text-align:center;color:var(--muted)">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <script>
-    function logout(){
-      localStorage.clear();
-      window.location.href = 'login.html'
+    // Prefer local signaling when testing on localhost, otherwise use meta or fallback
+    const SIGNALING = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+      ? `ws://${window.location.host}`
+      : (document.querySelector('meta[name="signal-server"]')?.content || 'wss://cls-11-ict.onrender.com')
+    const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+    let ws = null
+    let clientId = null
+    let devices = []
+    const pcs = new Map()
+    let reconnectAttempts = 0
+    const MAX_BACKOFF = 16000
+
+    function setStatus(connected, text){
+      const badge = document.getElementById('statusBadge')
+      if(!badge) return
+      if(connected){ badge.classList.remove('disconnected'); badge.classList.add('connected'); badge.textContent = text || 'Connected' }
+      else { badge.classList.remove('connected'); badge.classList.add('disconnected'); badge.textContent = text || 'Disconnected' }
     }
+
+    function showToast(msg, isError=false, timeout=3000){
+      const t = document.createElement('div'); t.className = 'toast' + (isError? ' error':''); t.textContent = msg; document.body.appendChild(t)
+      setTimeout(()=>{ t.style.opacity = '0'; setTimeout(()=>t.remove(),350) }, timeout)
+    }
+
+    function logout(){ localStorage.clear(); window.location.href='login.html' }
+
+    function formatTime(isoTime) {
+      if (!isoTime) return '-'
+      const date = new Date(isoTime)
+      return date.toLocaleString()
+    }
+
+    function calculateDuration(loginTime, logoutTime) {
+      if (!loginTime || !logoutTime) return '-'
+      const start = new Date(loginTime)
+      const end = new Date(logoutTime)
+      const diffMs = end - start
+      const diffMins = Math.floor(diffMs / 60000)
+      if (diffMins < 60) return diffMins + ' min'
+      const diffHours = Math.floor(diffMins / 60)
+      const mins = diffMins % 60
+      return diffHours + 'h ' + mins + 'm'
+    }
+
+    function showLogs() {
+      const modal = document.getElementById('logsModal')
+      modal.style.display = 'flex'
+      
+      fetch('/api/logs')
+        .then(res => res.json())
+        .then(data => {
+          if (data.error) {
+            document.getElementById('logsTable').innerHTML = '<tr><td colspan="4" style="padding:20px;text-align:center;color:#ef4444">' + data.error + '</td></tr>'
+            return
+          }
+          
+          if (!data.logs || data.logs.length === 0) {
+            document.getElementById('logsTable').innerHTML = '<tr><td colspan="4" style="padding:20px;text-align:center;color:var(--muted)">No logs available</td></tr>'
+            return
+          }
+          
+          const rows = data.logs.map(log => `
+            <tr style="border-bottom:1px solid rgba(255,255,255,0.06)">
+              <td style="padding:10px">${log.username}</td>
+              <td style="padding:10px;font-size:12px;color:var(--muted)">${formatTime(log.login_time)}</td>
+              <td style="padding:10px;font-size:12px;color:var(--muted)">${formatTime(log.logout_time)}</td>
+              <td style="padding:10px;color:var(--success)">${calculateDuration(log.login_time, log.logout_time)}</td>
+            </tr>
+          `).join('')
+          document.getElementById('logsTable').innerHTML = rows
+        })
+        .catch(err => {
+          document.getElementById('logsTable').innerHTML = '<tr><td colspan="4" style="padding:20px;text-align:center;color:#ef4444">Error loading logs: ' + err.message + '</td></tr>'
+        })
+    }
+
+    function closeLogs() {
+      document.getElementById('logsModal').style.display = 'none'
+    }
+
+    function initWS(){
+      ws = new WebSocket(SIGNALING)
+      setStatus(false, 'Connecting...')
+      ws.onopen = ()=>{
+        console.log('ws open ->', SIGNALING)
+        reconnectAttempts = 0
+        setStatus(true, 'Connected')
+        showToast('Signaling connected')
+        const name = localStorage.getItem('username') || 'teacher'
+        // send payload object (server expects msg.payload.username)
+        ws.send(JSON.stringify({ type: 'register-teacher', payload: { username: name } }))
+      }
+      ws.onmessage = e => {
+        try{
+          const msg = JSON.parse(e.data)
+          console.log('ws message ->', msg)
+          handleSignal(msg)
+        }catch(err){console.error('ws message parse', err)}
+      }
+      ws.onerror = err => { console.error('ws error', err); showToast('WebSocket error', true) }
+      ws.onclose = (ev)=>{
+        console.log('ws closed', ev)
+        setStatus(false, 'Disconnected')
+        showToast('Signaling disconnected', true)
+        reconnectAttempts++
+        const backoff = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_BACKOFF)
+        setTimeout(initWS, backoff)
+      }
+    }
+
+    function handleSignal(msg){
+      const t = msg.type
+      if(t==='registered') { clientId = msg.clientId }
+      else if(t==='device-list'){ devices = msg.devices || []; renderDevices() }
+      else if(t==='answer'){ handleAnswer(msg.fromId, msg.payload) }
+      else if(t==='ice-candidate'){ addIce(msg.fromId, msg.payload) }
+      else console.debug('sig', msg)
+    }
+
+    function renderDevices(){
+      const grid = document.getElementById('grid')
+      grid.innerHTML=''
+      devices.forEach(d=>{
+        const card = document.createElement('div')
+        card.className='card icon-card'
+        card.dataset.id = d.id
+        card.innerHTML = `
+          <div class="icon">💻</div>
+          <div class="meta"><div class="name">${d.name||d.id}</div><div class="small">${d.id}</div></div>
+          <div class="actions"><button class="btn" onclick="showControlPanel('${d.id}','${d.name||d.id}')">View</button></div>`
+        grid.appendChild(card)
+      })
+    }
+
+    function showControlPanel(targetId, name){
+      // Open a dedicated view page for this device
+      const url = `teacher-view.html?target=${encodeURIComponent(targetId)}&name=${encodeURIComponent(name)}`
+      window.open(url, '_blank')
+    }
+
+    async function requestMedia(targetId, mode){
+      if(!ws || ws.readyState!==1) return alert('Signaling not ready')
+      const pc = new RTCPeerConnection(RTC_CONFIG)
+      pcs.set(targetId, pc)
+      pc.ontrack = e => {
+        const v = document.getElementById('remoteVideo'); v.srcObject = e.streams[0]; document.getElementById('viewer').style.display='flex'
+      }
+      pc.onicecandidate = ev => { if(ev.candidate) ws.send(JSON.stringify({type:'ice-candidate', targetId, payload: ev.candidate})) }
+      try{
+        try{ pc.addTransceiver('video', { direction: 'recvonly' }) }catch(e){}
+        const offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        // wrap the offer with metadata so student knows what to share
+        const out = { type:'offer', targetId, payload: { desc: offer, meta: { mode } } }
+        console.log('sending offer ->', out)
+        ws.send(JSON.stringify(out))
+      }catch(err){ console.error(err); alert('Request failed') }
+    }
+
+    async function handleAnswer(fromId, answer){
+      const pc = pcs.get(fromId)
+      if(!pc) return console.warn('pc not found for', fromId)
+      await pc.setRemoteDescription(new RTCSessionDescription(answer))
+    }
+
+    async function addIce(fromId, candidate){
+      const pc = pcs.get(fromId)
+      if(!pc) return
+      try{ await pc.addIceCandidate(new RTCIceCandidate(candidate)) }catch(e){console.warn(e)}
+    }
+
+    function closeViewer(){ const v=document.getElementById('remoteVideo'); if(v.srcObject){ v.srcObject.getTracks().forEach(t=>t.stop()); v.srcObject=null } document.getElementById('viewer').style.display='none' }
+
+    document.addEventListener('DOMContentLoaded', ()=>{
+      // ensure username
+      if(!localStorage.getItem('username')) localStorage.setItem('username','Teacher')
+      document.getElementById('loggedInUser').textContent = localStorage.getItem('username')
+      initWS()
+    })
+
+    // Teachers: Keep session alive, don't auto-logout on close
+    window.addEventListener('beforeunload', ()=>{
+      // Teacher sessions persist in localStorage
+      // No auto-logout on page close for teachers
+    })
   </script>
 </body>
 </html>
