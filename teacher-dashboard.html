@@ -14,6 +14,8 @@
   </script>
   <title>CLS Monitor — Prototype</title>
   <link rel="stylesheet" href="styles.css">
+  <!-- Optional: set signaling server URL here for deployed frontend (e.g. wss://your-backend.example.com) -->
+  <meta name="signal-server" content="">
 </head>
 <body>
   <header>
@@ -100,8 +102,10 @@
     let pendingIncomingOffer = null
 
     function initWebSocket() {
+      const configured = document.querySelector('meta[name="signal-server"]').getAttribute('content') || ''
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      ws = new WebSocket(`${protocol}//${window.location.host}`)
+      const host = configured.trim() || window.location.host
+      ws = new WebSocket(`${protocol}//${host}`)
       
       ws.onopen = () => {
         console.log('WebSocket connected to server')
@@ -123,33 +127,27 @@
 
     function handleSignalingMessage(msg) {
       const { type, fromId, payload } = msg
-      
+
       if (type === 'registered') {
         clientId = msg.clientId
         console.log('Teacher registered as:', clientId)
-      } 
-      
-      else if (type === 'device-list') {
+      } else if (type === 'device-list') {
         devices = msg.devices || []
         render()
-      } 
-      offer') {
+      } else if (type === 'offer') {
         // Student is requesting to share their screen
         console.log('Incoming screen share request from student:', fromId)
         handleIncomingOffer(fromId, payload)
-      }
-      
-      else if (type === '
-      else if (type === 'answer') {
+      } else if (type === 'answer') {
         handleAnswer(fromId, payload)
-      } 
-      
-      else if (type === 'answer-reject') {
+      } else if (type === 'answer-reject') {
         handleAnswerReject(fromId)
-      } 
-      
-      else if (type === 'ice-candidate') {
+      } else if (type === 'ice-candidate') {
         handleIceCandidate(fromId, payload)
+      } else if (type === 'error') {
+        console.error('Signaling error:', msg.message || msg)
+      } else {
+        console.debug('Unhandled signaling message:', msg)
       }
     }
 

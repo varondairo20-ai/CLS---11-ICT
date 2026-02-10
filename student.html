@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>CLS Monitor — Student</title>
   <link rel="stylesheet" href="styles.css">
+  <!-- Optional: set signaling server URL here for deployed frontend (e.g. wss://your-backend.example.com) -->
+  <meta name="signal-server" content="">
   <script>
     // only allow students
     (function(){
@@ -104,8 +106,10 @@
 
     // Initialize WebSocket connection
     function initWebSocket() {
+      const configured = document.querySelector('meta[name="signal-server"]').getAttribute('content') || ''
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const wsUrl = `${protocol}//${window.location.host}`
+      const host = configured.trim() || window.location.host
+      const wsUrl = `${protocol}//${host}`
       console.log('Attempting WebSocket connection to:', wsUrl)
       ws = new WebSocket(wsUrl)
       
