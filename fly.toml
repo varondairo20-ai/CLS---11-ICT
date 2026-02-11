@@ -1,0 +1,29 @@
+# fly.toml file generated for cls-monitor
+
+app = "cls-monitor"
+primary_region = "iad"
+
+[build]
+  image = "cls-monitor:latest"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3000"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 3000
+  processes = ["app"]
+
+  [services.concurrency]
+    hard_limit = 1000
+    soft_limit = 200
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
